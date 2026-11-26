@@ -3,7 +3,7 @@ import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { after, test } from "node:test";
-import { builtIns, createSession, importPi, loadHost, png, workspace } from "./pi-host.mjs";
+import { builtIns, createSession, importPi, loadHost, packageDir, png, workspace } from "./pi-host.mjs";
 
 const paths = await workspace();
 const { api, tui, withBuiltInRenderers } = await loadHost(paths.agentDir);
@@ -36,15 +36,15 @@ test("built-ins use transparent self-framed single-line layout when settled and 
 		// Pending & running before result: 1 clean line (plus Pi's single leading blank separator)
 		const pendingRaw = row.render(90);
 		assert.equal(pendingRaw.length, 2, name + " pending total rows");
-		assert.deepEqual(plain(pendingRaw), [`▏ ◐ ${name}  ${subject}  · 等待结果`]);
+		assert.deepEqual(plain(pendingRaw), [`▏ ⠋ ${name}  ${subject}  · 等待结果`]);
 
 		row.markExecutionStarted();
-		assert.deepEqual(plain(row.render(90)), [`▏ ◐ ${name}  ${subject}  · 运行中`]);
+		assert.deepEqual(plain(row.render(90)), [`▏ ⠋ ${name}  ${subject}  · 运行中`]);
 
 		// Streaming shell shows live output on 2nd branch line; other tools stay compact
 		row.updateResult(result("测试实时输出"), true);
 		if (shell) {
-			assert.deepEqual(plain(row.render(90)), [`▏ ◐ ${name}  ${subject}  · 运行中`, "▏   └─ 测试实时输出"]);
+			assert.deepEqual(plain(row.render(90)), [`▏ ⠋ ${name}  ${subject}  · 运行中`, "▏   └─ 测试实时输出"]);
 		} else {
 			assert.equal(plain(row.render(90)).length, 1, name + " partial");
 		}
@@ -101,6 +101,126 @@ test("per-tool smart metrics, colored diff stats, relative paths and tail-preser
 	const narrow = plain(deepRow.render(48))[0];
 	assert.match(narrow, /…\/.*tool-execution\.js/);
 	assert.ok(tui.visibleWidth(deepRow.render(48)[1]) <= 48);
+});
+
+test("FFF search results use the compact layout with the original expanded renderers", async () => {
+	const { createExtensionRuntime, loadExtensions } = await importPi("core/extensions/loader.js");
+	const runtime = createExtensionRuntime();
+	let source = "npm:@ff-labs/pi-fff@0.11.0";
+	runtime.getAllTools = () => ["ffgrep", "fffind", "grep", "find"].map((name) => ({ name, sourceInfo: { source } }));
+	const loaded = await loadExtensions([join(packageDir, "index.ts")], paths.cwd, undefined, runtime);
+	assert.deepEqual(loaded.errors, []);
+	const [renderer] = loaded.extensions[0].toolRenderers;
+	const base = {
+		renderCall: () => new tui.Text("FFF search", 0, 0),
+		renderResult: (value) => new tui.Text(value.content[0].text, 0, 0),
+	};
+	const contextOutput = "src/file.ts\n 13- preceding context\n 14: needle\n 15- following context";
+	const found = result(contextOutput + '\n\n[Continue with cursor="fff_c1"]', { details: { totalMatched: 1 } });
+	const cases = [
+		["ffgrep", found, "1 处匹配 · 可翻页"],
+		["ffgrep", result("No matches found\n\n[Invalid regex: bad bracket, used literal match]", { details: { totalMatched: 0 } }), "无匹配 · 正则回退"],
+		["fffind", result("No files found matching pattern"), "无结果"],
+		["fffind", result('src/file.ts\n\n[2 more matches available. cursor="1" to continue]', { details: { totalMatched: 3 } }), "3 个文件 · 可翻页"],
+		["grep", result(contextOutput, { details: { totalMatched: 1 } }), "1 处匹配"],
+	];
+	for (const [name, value, summary] of cases) {
+		const args = { pattern: "needle", path: "src" };
+		const row = toolRow(name, args, { definition: renderer(name, () => base) });
+		row.updateResult(value);
+		assert.deepEqual(plain(row.render(100)), [`▏ ✓ ${name}  "needle"  src  · ${summary}`]);
+		assert.ok(!row.render(100).some((line) => line.includes(theme.getBgAnsi("toolSuccessBg"))));
+		row.setExpanded(true);
+		const reference = toolRow(name, args, { definition: base });
+		reference.updateResult(value);
+		reference.setExpanded(true);
+		assert.deepEqual(row.render(100), reference.render(100));
+	}
+
+	const error = toolRow("ffgrep", { pattern: "needle" }, { definition: renderer("ffgrep", () => base) });
+	error.updateResult(result("无法访问指定路径", { isError: true }));
+	assert.match(plain(error.render(80))[1], /无法访问指定路径/);
+	source = "npm:some-other-search-package";
+	assert.equal(renderer("ffgrep", () => base), base);
+	assert.equal(renderer("find", () => base), base);
+});
+
+test("animates waiting and running rows with spinner, breathing rail, live elapsed time, and clean stop", async () => {
+	const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+	const frames = [];
+	const rawLines = [];
+	let renders = 0;
+	let row;
+	const ui = {
+		requestRender() {
+			renders++;
+			const lines = row.render(90);
+			rawLines.push(lines[1]);
+			frames.push(plain(lines)[0]);
+		},
+	};
+	row = toolRow("bash", { command: "sleep 1" }, { ui, id: "anim-bash" });
+	const initial = row.render(90);
+	frames.push(plain(initial)[0]);
+	rawLines.push(initial[1]);
+	assert.equal(frames[0], "▏ ⠋ bash  sleep 1  · 等待结果");
+
+	// Wait across several 100ms animation ticks to verify smooth frame progression and breathing rail
+	await sleep(450);
+	assert.ok(renders >= 3, `expected >= 3 animation ticks, got ${renders}`);
+	assert.ok(frames.some((line) => line.startsWith("▏ ⠙ bash")), frames.join("\n"));
+	assert.ok(frames.some((line) => line.startsWith("▏ ⠹ bash")), frames.join("\n"));
+	assert.ok(frames.some((line) => line.startsWith("▏ ⠸ bash")), frames.join("\n"));
+	const widths = new Set(rawLines.map((line) => tui.visibleWidth(line)));
+	assert.equal(widths.size, 1, "spinner animation must not shift line width");
+	const dimRail = `\x1b[2m${theme.fg("warning", "▏")}\x1b[22m`;
+	assert.ok(rawLines.some((line) => !line.includes(dimRail)), "rail should pulse bright on part of cycle");
+	assert.ok(rawLines.some((line) => line.includes(dimRail)), "rail should pulse dim on part of cycle");
+
+	// Verify live elapsed seconds appear after 1s while waiting, then reset on execution start
+	const realNow = Date.now;
+	let offset = 2400;
+	Date.now = () => realNow() + offset;
+	try {
+		row.invalidate();
+		assert.match(plain(row.render(90))[0], /等待结果 · 2s$/);
+		row.markExecutionStarted();
+		assert.match(plain(row.render(90))[0], /运行中$/);
+		offset += 3100;
+		row.updateResult(result("仍在运行"), true);
+		const live = plain(row.render(90));
+		assert.match(live[0], /运行中 · 3s$/);
+		assert.equal(live[1], "▏   └─ 仍在运行");
+	} finally {
+		Date.now = realNow;
+	}
+
+	// Expanding pauses our collapsed animation ticks; collapsing resumes them
+	row.setExpanded(true);
+	const rendersWhileExpanded = renders;
+	await sleep(250);
+	assert.equal(renders, rendersWhileExpanded, "collapsed animation must pause while expanded");
+	row.setExpanded(false);
+	row.render(90);
+	await sleep(250);
+	assert.ok(renders > rendersWhileExpanded, "collapsed animation must resume after collapsing partial row");
+
+	// Settling stops the animation completely
+	row.updateResult(result("完成输出", { durationMs: 420 }));
+	assert.deepEqual(plain(row.render(90)), ["▏ ✓ bash  sleep 1  · 1 行 · 420ms"]);
+	const rendersAfterSettle = renders;
+	await sleep(250);
+	assert.equal(renders, rendersAfterSettle, "animation must stop after settling");
+
+	// Detached/unrendered rows automatically stop ticking instead of leaking intervals
+	let detachedTicks = 0;
+	const detached = toolRow("read", { path: "中文-一.txt" }, { ui: { requestRender() { detachedTicks++; } }, id: "anim-detached" });
+	detached.render(90);
+	await sleep(360);
+	const afterAutoStop = detachedTicks;
+	assert.ok(afterAutoStop >= 1 && afterAutoStop <= 3, `expected auto-stop within 2-3 ticks, got ${afterAutoStop}`);
+	await sleep(250);
+	assert.equal(detachedTicks, afterAutoStop, "unrendered row must stop ticking automatically");
 });
 
 test("keeps the tool name, error color and real failure at narrow Unicode widths", () => {
@@ -221,7 +341,7 @@ test("codemode collapses clean runs to one breakdown line and surfaces nested or
 	};
 	row.markExecutionStarted();
 	row.updateResult({ content: [], details: { calls: [{ name: "read", args: "{}", status: "running" }] } }, true);
-	assert.deepEqual(plain(row.render(80)), ["▏ ◐ codemode  read  · 1 次 · 正在执行 read"]);
+	assert.deepEqual(plain(row.render(80)), ["▏ ⠋ codemode  read  · 1 次 · 正在执行 read"]);
 
 	row.updateResult(cleanOutcome);
 	assert.deepEqual(plain(row.render(80)), ["▏ ✓ codemode  read×2, ls, bash  · 4 次 · 140ms"]);

@@ -1,6 +1,6 @@
 # Pi 工具 UI
 
-适用于 Pi 1.6.1 的本地工具显示包。收起时采用透明无底框的极简细竖线布局：常规完成调用压缩为单行，自带路径精简、文件行数、diff 增删数、子调用汇总和耗时；仅在出错、流式运行中、截断全文或图片兼容提示时展开第二行分枝。
+适用于 Pi 1.6.1 的本地工具显示包。收起时采用透明无底框的极简细竖线布局：等待与运行中带有顺滑旋转指示、轻呼吸竖线及实时耗时；常规完成调用压缩为单行，自带路径精简、文件行数、diff 增删数、子调用汇总和耗时；仅在出错、流式运行中、截断全文或图片兼容提示时展开第二行分枝。
 
 ```text
  ▏ ✓ read  pi-tool-ui/index.ts:1-80  · 80 行 · 12ms
@@ -10,7 +10,8 @@
  ▏   └─ ENOENT: no such file or directory, …
 ```
 
-- 支持 Pi 原生的 `read`、`bash`、`powershell`、`edit`、`write`、`grep`、`find`、`ls` 和 `codemode`。收起的 `codemode` 展示子调用分布与耗时，失败时在第二行显示真实错误；展开可看完整脚本、子调用和输出。MCP、提问、subagent 和覆盖了同名工具的扩展继续使用各自的 renderer。
+- 支持 Pi 原生的 `read`、`bash`、`powershell`、`edit`、`write`、`grep`、`find`、`ls` 和 `codemode`。收起的 `codemode` 展示子调用分布与耗时，失败时在第二行显示真实错误；展开可看完整脚本、子调用和输出。MCP、提问和 subagent 沿用各自的 renderer。
+- 通过 npm 安装 `@ff-labs/pi-fff` 时，`ffgrep` 和 `fffind` 的收起态也会显示透明单行摘要。展开后由 FFF 显示完整命中和翻页提示。
 - 通过 Pi 1.6.1 原生 `renderShell: "self"` 去掉收起态的大面积底色框和上下空行，不修改 `Container`、`ScrollView`、`MouseRegion` 或 `setExpanded`。
 - `Ctrl+O` 是 Pi 1.6.1 默认的展开快捷键，实际按键以用户配置为准。Fullscreen 下也可以点击调用行。展开后恢复 Pi 原生底框、输出、diff 和图片。Regular 的滚动回看由终端宿主管理，fullscreen 的视口与 `Ctrl+End` 由 Pi 管理。
 - 收起时按终端列宽裁剪，长路径优先保留文件名。结果被工具截断时会显示提示；支持 OSC 8 的终端可以从「全文」进入原生 Bash 或 PowerShell 保存的输出文件。
