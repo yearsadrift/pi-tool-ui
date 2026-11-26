@@ -19,21 +19,27 @@ import {
 	type MouseEventResult,
 	replaceControlCharacters,
 	stripTerminalSequences,
+	Text,
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 
 const searchTools = new Set(["grep", "find", "ffgrep", "fffind"]);
-const tools = new Set(["read", "bash", "powershell", "edit", "write", "ls", "codemode", ...searchTools]);
+const webTools = new Set(["web_search", "fetch_content", "get_search_content", "source_check"]);
+const tools = new Set(["read", "bash", "powershell", "edit", "write", "ls", "codemode", "tool_search", ...searchTools, ...webTools]);
 const fffPackage = /^npm:@ff-labs\/pi-fff(?:@[^/]+)?$/;
+const webAccessPackage = /^npm:pi-web-access(?:@[^/]+)?$/;
 const scriptHeader = /^Script (?:completed|failed)\r?\nWall time [\d.]+ seconds\r?\nOutput:\s*$/;
 const shellStatusPattern = /^Command (?:exited with code (\d+)|timed out after .+|aborted|terminated without an exit code)$/;
 const shellFooterPattern = /^\[Showing (?:lines |last ).+?\. (?:Full output: (.+)|Could not save the full output: (.+))\]$/;
 const genericFooterPattern = /^\[(?:Showing lines |Truncated |Matches truncated|Results truncated|Entries truncated|Line \d+ is )/;
 const rowState = Symbol("pi-tool-ui row");
+const waitingFrames = ["·", "·", "•", "•", "●", "●", "•", "•", "·", "·"];
 const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const animationIntervalMs = 100;
 const maxMissedAnimationTicks = 2;
+const toolNamePadWidth = 8;
+const minAlignedRowWidth = 48;
 type RenderContext = Parameters<NonNullable<ToolRenderers["renderCall"]>>[2];
 type Line = (width: number) => string;
 
@@ -70,7 +76,33 @@ interface ResultDetails {
 	totalMatched?: number;
 	linesTruncated?: boolean;
 	imageUnsupportedByModel?: string;
-	calls?: { name: string; status: "running" | "ok" | "error" | "cancelled"; error?: string }[];
+	loaded?: string[];
+	error?: string;
+	phase?: string;
+	progress?: number;
+	currentQuery?: string;
+	curatorUrl?: string;
+	shortcut?: string;
+	queryCount?: number;
+	successfulQueries?: number;
+	totalResults?: number;
+	curated?: boolean;
+	summary?: { text?: string };
+	fetchId?: string;
+	fetchUrls?: string[];
+	urlCount?: number;
+	successful?: number;
+	title?: string;
+	totalChars?: number;
+	truncated?: boolean;
+	imageCount?: number;
+	hasImage?: boolean;
+	matchCount?: number;
+	returnedMatches?: number;
+	resultCount?: number;
+	contentLength?: number;
+	nextOffset?: number;
+	calls?: { name: string; args?: string; status: "running" | "ok" | "error" | "cancelled"; error?: string }[];
 }
 
 interface MetricSegment {
@@ -188,8 +220,9 @@ function stopAnimation(row: RowState): void {
 	}
 }
 
-function spinnerFrame(row: RowState): string {
-	return spinnerFrames[(row.frame ?? 0) % spinnerFrames.length]!;
+function activeSymbol(row: RowState, executionStarted: boolean): string {
+	const index = (row.frame ?? 0) % spinnerFrames.length;
+	return executionStarted ? spinnerFrames[index]! : waitingFrames[index]!;
 }
 
 function railPulse(row: RowState): boolean {
@@ -209,6 +242,86 @@ function formatLiveElapsed(ms: number): string {
 	const minutes = Math.floor(totalSeconds / 60);
 	const seconds = totalSeconds % 60;
 	return `${minutes}m${seconds}s`;
+}
+
+function durationColor(ms: number | undefined): ThemeColor {
+	if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 1000) return "dim";
+	return ms >= 5000 ? "warning" : "muted";
+}
+
+function formatCharCount(chars: number): string {
+	if (chars < 1000) return `${chars} 字`;
+	return `${(chars / 1000).toFixed(1)}k 字`;
+}
+
+function isLinkablePath(raw: string): boolean {
+	return Boolean(raw) && !/[*?[\]{}]/.test(raw);
+}
+
+function buildFileLink(rawPath: string, cwd: string): string | undefined {
+	if (!getCapabilities().hyperlinks || !isLinkablePath(rawPath)) return undefined;
+	try {
+		return pathToFileURL(resolve(cwd, rawPath)).href;
+	} catch {
+		return undefined;
+	}
+}
+
+function shortenUrl(raw: string): string {
+	const cleaned = oneLine(raw);
+	if (!cleaned) return "";
+	try {
+		const url = new URL(cleaned);
+		const host = url.host.replace(/^www\./i, "");
+		const pathname = url.pathname === "/" ? "" : url.pathname.replace(/\/+$/, "");
+		return `${host}${pathname}`;
+	} catch {
+		return cleaned.replace(/^https?:\/\/(?:www\.)?/i, "").replace(/\/+$/, "");
+	}
+}
+
+function buildWebLink(raw: string): string | undefined {
+	if (!getCapabilities().hyperlinks) return undefined;
+	const cleaned = oneLine(raw);
+	return /^https?:\/\//i.test(cleaned) ? cleaned : undefined;
+}
+
+function extractStringList(single: unknown, list: unknown): string[] {
+	if (Array.isArray(list)) {
+		return list.map(oneLine).filter(Boolean);
+	}
+	const item = oneLine(single);
+	return item ? [item] : [];
+}
+
+function formatNestedCallPreview(call: NonNullable<ResultDetails["calls"]>[number] | undefined, cwd: string): string {
+	if (!call) return "";
+	const name = oneLine(call.name);
+	if (!name) return "";
+	const rawArgs = typeof call.args === "string" ? call.args.trim() : "";
+	if (!rawArgs || rawArgs === "{}") return "";
+	let target = "";
+	try {
+		const parsed = JSON.parse(rawArgs) as Record<string, unknown> | null;
+		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+			const summary = oneLine(parsed.displaySummary);
+			const command = oneLine(parsed.command);
+			const filePath = oneLine(parsed.file_path ?? parsed.path);
+			const pattern = oneLine(parsed.pattern);
+			const query = oneLine(parsed.query) || extractStringList(undefined, parsed.queries)[0] || "";
+			const url = oneLine(parsed.url) || extractStringList(undefined, parsed.urls)[0] || "";
+			if (summary) target = summary;
+			else if (command) target = command;
+			else if (pattern && filePath && filePath !== ".") target = `"${pattern}"  ${shortenPath(filePath, cwd)}`;
+			else if (pattern) target = `"${pattern}"`;
+			else if (filePath) target = shortenPath(filePath, cwd);
+			else if (query) target = `"${query}"`;
+			else if (url) target = shortenUrl(url);
+		}
+	} catch {
+		target = oneLine(rawArgs);
+	}
+	return target ? `${name}  ${target}` : "";
 }
 
 function oneLine(value: unknown): string {
@@ -262,7 +375,7 @@ function truncatePath(displayPath: string, maxWidth: number): string {
 	return `…/${tail}`;
 }
 
-function stylePath(displayPath: string, range: string, maxWidth: number, theme: Theme): string {
+function stylePath(displayPath: string, range: string, maxWidth: number, theme: Theme, linkUrl?: string): string {
 	if (maxWidth <= 0) return "";
 	const rangeWidth = visibleWidth(range);
 	const keepRange = rangeWidth > 0 && maxWidth > rangeWidth + 4;
@@ -272,7 +385,8 @@ function stylePath(displayPath: string, range: string, maxWidth: number, theme: 
 	const styledPath = slash >= 0
 		? theme.fg("dim", fitted.slice(0, slash + 1)) + theme.fg("text", fitted.slice(slash + 1))
 		: theme.fg("text", fitted);
-	return keepRange ? styledPath + theme.fg("dim", range) : styledPath;
+	const linkedPath = linkUrl ? hyperlink(styledPath, linkUrl) : styledPath;
+	return keepRange ? linkedPath + theme.fg("accent", range) : linkedPath;
 }
 
 function formatDuration(durationMs: number | undefined): string {
@@ -341,6 +455,16 @@ function renderMetrics(theme: Theme, segments: MetricSegment[]): { text: string;
 	return { text, width: visibleWidth(text) };
 }
 
+function renderQuotedList(items: string[], maxWidth: number, theme: Theme, emptyFallback = "…"): string {
+	if (items.length === 0) return theme.fg("dim", truncateToWidth(emptyFallback, maxWidth, "…"));
+	const extra = items.length > 1 ? ` +${items.length - 1}` : "";
+	const extraWidth = visibleWidth(extra);
+	const keepExtra = extraWidth > 0 && maxWidth > extraWidth + 6;
+	const budget = keepExtra ? maxWidth - extraWidth : maxWidth;
+	const quoted = theme.fg("accent", truncateToWidth(`"${items[0]}"`, budget, "…"));
+	return keepExtra ? quoted + theme.fg("dim", extra) : quoted;
+}
+
 function renderSubject(
 	name: string,
 	args: Record<string, unknown> | undefined,
@@ -352,11 +476,13 @@ function renderSubject(
 	if (maxWidth <= 0) return "";
 
 	if (name === "bash" || name === "powershell") {
-		const command = oneLine(args?.command) || "…";
+		const summary = oneLine(args?.displaySummary);
+		const primary = summary || oneLine(args?.command) || "…";
+		const color: ThemeColor = summary ? "text" : "toolOutput";
 		const timeout = typeof args?.timeout === "number" ? ` · ${args.timeout}s` : "";
 		const keepTimeout = timeout && maxWidth > visibleWidth(timeout) + 6;
 		const cmdBudget = keepTimeout ? maxWidth - visibleWidth(timeout) : maxWidth;
-		const styled = theme.fg("toolOutput", truncateToWidth(command, cmdBudget, "…"));
+		const styled = theme.fg(color, truncateToWidth(primary, cmdBudget, "…"));
 		return keepTimeout ? styled + theme.fg("dim", timeout) : styled;
 	}
 
@@ -365,31 +491,76 @@ function renderSubject(
 		return theme.fg("toolOutput", truncateToWidth(label, maxWidth, "…"));
 	}
 
+	if (name === "tool_search") {
+		const query = oneLine(args?.query);
+		return query ? theme.fg("accent", truncateToWidth(`"${query}"`, maxWidth, "…")) : theme.fg("dim", "…");
+	}
+
+	if (name === "web_search") {
+		return renderQuotedList(extractStringList(args?.query, args?.queries), maxWidth, theme);
+	}
+
+	if (name === "source_check") {
+		const claim = oneLine(args?.claim);
+		return claim ? theme.fg("accent", truncateToWidth(`"${claim}"`, maxWidth, "…")) : renderQuotedList(extractStringList(undefined, args?.queries), maxWidth, theme);
+	}
+
+	if (name === "fetch_content") {
+		const urls = extractStringList(args?.url, args?.urls);
+		if (urls.length === 0) return theme.fg("dim", "…");
+		const extra = urls.length > 1 ? ` +${urls.length - 1}` : "";
+		const extraWidth = visibleWidth(extra);
+		const keepExtra = extraWidth > 0 && maxWidth > extraWidth + 6;
+		const budget = keepExtra ? maxWidth - extraWidth : maxWidth;
+		const display = truncatePath(shortenUrl(urls[0]!), budget);
+		const styled = theme.fg("text", display);
+		const webLink = buildWebLink(urls[0]!);
+		const linked = webLink ? hyperlink(styled, webLink) : styled;
+		return keepExtra ? linked + theme.fg("dim", extra) : linked;
+	}
+
+	if (name === "get_search_content") {
+		const findTerms = extractStringList(args?.findText, Array.isArray(args?.findText) ? args.findText : undefined);
+		if (findTerms.length > 0) return renderQuotedList(findTerms, maxWidth, theme);
+		const query = oneLine(args?.query);
+		if (query) return theme.fg("accent", truncateToWidth(`"${query}"`, maxWidth, "…"));
+		const url = oneLine(args?.url);
+		if (url) {
+			const styled = theme.fg("text", truncatePath(shortenUrl(url), maxWidth));
+			const webLink = buildWebLink(url);
+			return webLink ? hyperlink(styled, webLink) : styled;
+		}
+		const responseId = oneLine(args?.responseId);
+		return theme.fg("dim", truncateToWidth(responseId ? responseId.slice(0, 8) : "…", maxWidth, "…"));
+	}
+
 	const rawPath = oneLine(args?.file_path ?? args?.path);
 	const displayPath = shortenPath(rawPath, cwd);
+	const fileLink = buildFileLink(rawPath, cwd);
 
 	if (name === "read") {
 		const range = formatReadLineRange(args?.offset, args?.limit);
-		return stylePath(displayPath || "…", range, maxWidth, theme);
+		return stylePath(displayPath || "…", range, maxWidth, theme, fileLink);
 	}
 
 	if (searchTools.has(name)) {
 		const pattern = oneLine(args?.pattern);
-		if (!pattern) return stylePath(displayPath || ".", "", maxWidth, theme);
+		if (!pattern) return stylePath(displayPath || ".", "", maxWidth, theme, fileLink);
 		const quoted = `"${pattern}"`;
 		if (!displayPath || displayPath === ".") {
-			return theme.fg("text", truncateToWidth(quoted, maxWidth, "…"));
+			return theme.fg("accent", truncateToWidth(quoted, maxWidth, "…"));
 		}
 		const patternWidth = visibleWidth(quoted);
 		if (patternWidth + 4 >= maxWidth) {
-			return theme.fg("text", truncateToWidth(quoted, maxWidth, "…"));
+			return theme.fg("accent", truncateToWidth(quoted, maxWidth, "…"));
 		}
 		const pathBudget = maxWidth - patternWidth - 2;
 		const fittedPath = truncatePath(displayPath, pathBudget);
-		return `${theme.fg("text", quoted)}  ${theme.fg("dim", fittedPath)}`;
+		const styledPath = theme.fg("dim", fittedPath);
+		return `${theme.fg("accent", quoted)}  ${fileLink ? hyperlink(styledPath, fileLink) : styledPath}`;
 	}
 
-	return stylePath(displayPath || (name === "ls" ? "." : "…"), "", maxWidth, theme);
+	return stylePath(displayPath || (name === "ls" ? "." : "…"), "", maxWidth, theme, fileLink);
 }
 
 function headerLine(
@@ -408,7 +579,10 @@ function headerLine(
 ): Line {
 	const { name, args, cwd, symbol, statusColor, railColor, railPulse: pulse = false, metrics, codemodeLabel } = options;
 	return (width) => {
-		const basePrefix = `${theme.fg(statusColor, symbol)} ${theme.fg("toolTitle", theme.bold(name))}`;
+		const paddedName = width >= minAlignedRowWidth && name.length < toolNamePadWidth
+			? name.padEnd(toolNamePadWidth)
+			: name;
+		const basePrefix = `${theme.fg(statusColor, symbol)} ${theme.fg("toolTitle", theme.bold(paddedName))}`;
 		const rail = width >= visibleWidth(basePrefix) + 2 ? `${railGlyph(theme, railColor, pulse)} ` : "";
 		const prefix = `${rail}${basePrefix}`;
 		const prefixWidth = visibleWidth(prefix);
@@ -490,7 +664,7 @@ function buildCodemodeLines(
 	const lastError = errors.at(-1);
 	const nestedError = lastError ? [oneLine(lastError.name), oneLine(lastError.error)].filter(Boolean).join(" ") : "";
 
-	const symbol = issue ? "×" : animating ? spinnerFrame(row) : hasNestedError ? "!" : "✓";
+	const symbol = issue ? "×" : animating ? activeSymbol(row, context.executionStarted) : hasNestedError ? "!" : "✓";
 	const statusColor: ThemeColor = issue || hasNestedError ? "error" : context.isPartial ? "warning" : "success";
 	const railColor: ThemeColor = issue || hasNestedError ? "error" : context.isPartial ? "warning" : "dim";
 
@@ -513,10 +687,9 @@ function buildCodemodeLines(
 	} else if (calls.length === 0) {
 		metrics.push({ text: "完成", color: "dim" });
 	}
-	const duration = animating
-		? formatLiveElapsed(getElapsedMs(row, context.executionStarted))
-		: formatDuration(context.durationMs);
-	if (duration) metrics.push({ text: duration, color: "dim" });
+	const elapsedMs = animating ? getElapsedMs(row, context.executionStarted) : context.durationMs;
+	const duration = animating ? formatLiveElapsed(elapsedMs ?? 0) : formatDuration(context.durationMs);
+	if (duration) metrics.push({ text: duration, color: durationColor(elapsedMs) });
 
 	const lines: Line[] = [
 		headerLine(theme, {
@@ -550,6 +723,11 @@ function buildCodemodeLines(
 	} else if (details?.fullOutputPath) {
 		const tail = oneLine(blocks.at(-1)?.split(/\r?\n/).filter(Boolean).at(-1)) || `${calls.length} 个子调用`;
 		lines.push(fullOutputDetail(theme, railColor, tail, "toolOutput", details.fullOutputPath, context.cwd, pulse));
+	} else if (animating) {
+		const activePreview = formatNestedCallPreview(running.at(-1), context.cwd);
+		if (activePreview) {
+			lines.push(detailLine(theme, railColor, activePreview, "toolOutput", "", undefined, pulse));
+		}
 	}
 
 	return lines;
@@ -562,11 +740,12 @@ function buildToolLines(
 	context: RenderContext,
 	theme: Theme,
 	fffSearch: boolean,
+	webAccess: boolean,
 	row: RowState,
 ): Line[] {
 	const shell = name === "bash" || name === "powershell";
 	const details = result.details as ResultDetails | undefined;
-	const isError = Boolean(result.isError || context.isError);
+	const isError = Boolean(result.isError || context.isError || (webAccess && !context.isPartial && typeof details?.error === "string" && details.error));
 	const animating = context.isPartial && !isError;
 	const pulse = animating && railPulse(row);
 	const output = result.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n");
@@ -589,6 +768,7 @@ function buildToolLines(
 	const truncated = Boolean(
 		footer ||
 		details?.truncation?.truncated ||
+		details?.truncated ||
 		details?.matchLimitReached ||
 		details?.resultLimitReached ||
 		details?.entryLimitReached ||
@@ -596,7 +776,7 @@ function buildToolLines(
 	);
 	const image = result.content.find((block) => block.type === "image");
 
-	const symbol = isError ? "×" : animating ? spinnerFrame(row) : "✓";
+	const symbol = isError ? "×" : animating ? activeSymbol(row, context.executionStarted) : "✓";
 	const statusColor: ThemeColor = isError ? "error" : context.isPartial ? "warning" : "success";
 	const railColor: ThemeColor = isError ? "error" : context.isPartial ? "warning" : "dim";
 
@@ -611,14 +791,34 @@ function buildToolLines(
 	});
 
 	const metrics: MetricSegment[] = [];
-	const duration = animating
-		? formatLiveElapsed(getElapsedMs(row, context.executionStarted))
-		: formatDuration(context.durationMs);
+	const elapsedMs = animating ? getElapsedMs(row, context.executionStarted) : context.durationMs;
+	const duration = animating ? formatLiveElapsed(elapsedMs ?? 0) : formatDuration(context.durationMs);
 
 	if (isError) {
 		if (exitCode) metrics.push({ text: `exit ${exitCode}`, color: "error" });
 	} else if (context.isPartial) {
-		metrics.push({ text: "运行中", color: "warning" });
+		if (webAccess) {
+			const phase = details?.phase;
+			const pct = typeof details?.progress === "number" && details.progress > 0 && details.progress < 1
+				? ` ${Math.round(details.progress * 100)}%`
+				: "";
+			if (phase === "curating" || phase === "waiting-for-approval" || phase === "curator-fallback") {
+				metrics.push({ text: "等待确认", color: "warning" });
+			} else if (phase === "generating-summary") {
+				metrics.push({ text: "生成摘要", color: "warning" });
+			} else if (name === "fetch_content") {
+				metrics.push({ text: `抓取中${pct}`, color: "warning" });
+			} else if (name === "web_search") {
+				metrics.push({ text: `搜索中${pct}`, color: "warning" });
+			} else {
+				metrics.push({ text: "运行中", color: "warning" });
+			}
+		} else {
+			metrics.push({ text: "运行中", color: "warning" });
+			if (shell && contentLines.length > 0 && !(contentLines.length === 1 && contentLines[0] === "(no output)")) {
+				metrics.push({ text: `${contentLines.length} 行`, color: "dim" });
+			}
+		}
 	} else if (name === "read") {
 		if (image) {
 			metrics.push({ text: `图片 ${oneLine(image.mimeType)}`, color: "muted" });
@@ -676,6 +876,54 @@ function buildToolLines(
 			}
 		}
 		if (truncated && !fullOutputPath) metrics.push({ text: "截断", color: "warning" });
+	} else if (name === "tool_search") {
+		const loaded = Array.isArray(details?.loaded) ? details.loaded.length : undefined;
+		if (typeof loaded === "number") {
+			metrics.push({ text: loaded === 0 ? "无匹配" : `加载 ${loaded} 个工具`, color: "dim" });
+		} else {
+			const empty = contentLines.length === 0 || /^No matching tools/i.test(contentLines[0]!);
+			metrics.push({ text: empty ? "无匹配" : "已加载", color: "dim" });
+		}
+	} else if (name === "web_search") {
+		if (typeof details?.queryCount === "number" && details.queryCount > 1) {
+			metrics.push({ text: `${details.successfulQueries ?? details.queryCount}/${details.queryCount} 组`, color: "dim" });
+		}
+		if (typeof details?.totalResults === "number") {
+			metrics.push({ text: details.totalResults > 0 ? `${details.totalResults} 来源` : "无结果", color: "dim" });
+		} else {
+			metrics.push({ text: contentLines.length > 0 ? "已完成" : "无结果", color: "dim" });
+		}
+		if (details?.summary?.text) metrics.push({ text: "已摘要", color: "muted" });
+		if (details?.curated) metrics.push({ text: "已精选", color: "muted" });
+		if (details?.fetchId && details.fetchUrls?.length) {
+			metrics.push({ text: `抓取 ${details.fetchUrls.length} 页`, color: "dim" });
+		}
+	} else if (name === "fetch_content") {
+		if (details?.urlCount === 1) {
+			if (typeof details.totalChars === "number") {
+				metrics.push({ text: formatCharCount(details.totalChars), color: "dim" });
+			}
+			const imgCount = details.imageCount ?? (details.hasImage ? 1 : 0);
+			if (imgCount > 0) metrics.push({ text: `${imgCount} 图`, color: "muted" });
+			if (details.truncated) metrics.push({ text: "截断", color: "warning" });
+		} else if (typeof details?.urlCount === "number") {
+			metrics.push({ text: `${details.successful ?? 0}/${details.urlCount} 页`, color: "dim" });
+		} else {
+			metrics.push({ text: contentLines.length > 0 ? "已抓取" : "无内容", color: "dim" });
+		}
+	} else if (name === "get_search_content") {
+		if (typeof details?.matchCount === "number") {
+			metrics.push({ text: details.matchCount > 0 ? `${details.matchCount} 处匹配` : "无匹配", color: "dim" });
+		} else if (typeof details?.resultCount === "number") {
+			metrics.push({ text: `${details.resultCount} 条结果`, color: "dim" });
+		} else if (typeof details?.contentLength === "number") {
+			metrics.push({ text: formatCharCount(details.contentLength), color: "dim" });
+		} else {
+			metrics.push({ text: contentLines.length > 0 ? "已读取" : "无内容", color: "dim" });
+		}
+		if (details?.nextOffset !== undefined) metrics.push({ text: "可翻页", color: "dim" });
+	} else if (name === "source_check") {
+		metrics.push({ text: contentLines.length > 0 ? "已核查" : "无结果", color: "dim" });
 	} else if (name === "ls") {
 		const empty = contentLines.length === 0 || (contentLines.length === 1 && /^\(empty directory\)$/i.test(contentLines[0]!));
 		metrics.push({ text: empty ? "空目录" : `${contentLines.length} 项`, color: "dim" });
@@ -693,7 +941,7 @@ function buildToolLines(
 		}
 	}
 
-	if (duration) metrics.push({ text: duration, color: "dim" });
+	if (duration) metrics.push({ text: duration, color: durationColor(elapsedMs) });
 
 	const out: Line[] = [
 		headerLine(theme, {
@@ -718,7 +966,7 @@ function buildToolLines(
 	}
 
 	if (isError) {
-		const errText = preview || "执行失败";
+		const errText = oneLine(details?.error) || preview || "执行失败";
 		if (typeof fullOutputPath === "string" && fullOutputPath) {
 			out.push(fullOutputDetail(theme, railColor, errText, "error", fullOutputPath, context.cwd));
 		} else if (fullOutputError) {
@@ -734,11 +982,35 @@ function buildToolLines(
 		out.push(detailLine(theme, railColor, `图片 ${oneLine(image?.mimeType) || "image"}`, "muted", `模型不支持图片 · ${oneLine(details.imageUnsupportedByModel)}`));
 	} else if (details?.truncation?.firstLineExceedsLimit) {
 		out.push(detailLine(theme, railColor, preview || "首行超出大小限制", "warning", "截断"));
+	} else if (context.isPartial && webAccess && details?.curatorUrl) {
+		const shortcutHint = details.shortcut ? `${details.shortcut} 重开` : "浏览器中确认";
+		out.push(detailLine(theme, railColor, details.curatorUrl, "accent", shortcutHint, buildWebLink(details.curatorUrl), pulse));
+	} else if (context.isPartial && webAccess && details?.currentQuery) {
+		out.push(detailLine(theme, railColor, `"${oneLine(details.currentQuery)}"`, "toolOutput", "", undefined, pulse));
 	} else if (context.isPartial && shell && preview) {
 		out.push(detailLine(theme, railColor, preview, "toolOutput", truncated ? "截断" : "", undefined, pulse));
 	}
 
 	return out;
+}
+
+function fallbackCallComponent(name: string, args: unknown, theme: Theme): Component {
+	const header = theme.fg("toolTitle", theme.bold(name));
+	if (!args || typeof args !== "object") return new Text(header, 0, 0);
+	const entries = Object.entries(args as Record<string, unknown>);
+	if (entries.length === 0) return new Text(header, 0, 0);
+	const lines = entries.map(([key, value]) => {
+		const text = typeof value === "string" ? value : (JSON.stringify(value, null, 2) ?? String(value));
+		return `  ${key}: ${text.replace(/\t/g, "   ").replace(/\r/g, "").split("\n").join("\n    ")}`;
+	});
+	return new Text(`${header}\n${theme.fg("muted", lines.join("\n"))}`, 0, 0);
+}
+
+function fallbackResultComponent(result: AgentToolResult<unknown>, theme: Theme): Component {
+	const output = result.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n");
+	if (!output) return new Text("", 0, 0);
+	const styled = output.split("\n").map((line) => theme.fg("toolOutput", line)).join("\n");
+	return new Text(styled, 0, 0);
 }
 
 function getNativeBoxBg(theme: Theme, isPartial: boolean, isError: boolean): (text: string) => string {
@@ -749,12 +1021,16 @@ function getNativeBoxBg(theme: Theme, isPartial: boolean, isError: boolean): (te
 export default function (pi: ExtensionAPI): void {
 	pi.registerToolRenderer((name, next) => {
 		const base = next();
-		if (!tools.has(name) || !base?.renderCall || !base.renderResult) return base;
+		if (!base || !tools.has(name)) return base;
 		const source = pi.getAllTools().find((tool) => tool.name === name)?.sourceInfo;
+		const builtin = source?.path === `builtin:${name}` || (name === "tool_search" && source?.path === "builtin:tool-search");
 		const fffSearch = searchTools.has(name) && fffPackage.test(source?.source ?? "");
-		if (source?.path !== `builtin:${name}` && !fffSearch) return base;
+		const webAccess = webTools.has(name) && webAccessPackage.test(source?.source ?? "");
+		if (!builtin && !fffSearch && !webAccess) return base;
+		if (!webAccess && name !== "tool_search" && (!base.renderCall || !base.renderResult)) return base;
 
-		const { renderCall, renderResult } = base;
+		const renderCall = base.renderCall ?? ((args: unknown, theme: Theme) => fallbackCallComponent(name, args, theme));
+		const renderResult = base.renderResult ?? ((result: AgentToolResult<unknown>, _opts: unknown, theme: Theme) => fallbackResultComponent(result, theme));
 		const nativeSelf = base.renderShell === "self";
 		const shell = name === "bash" || name === "powershell";
 		const edit = name === "edit";
@@ -795,14 +1071,15 @@ export default function (pi: ExtensionAPI): void {
 				const metrics: MetricSegment[] = [
 					{ text: context.executionStarted ? "运行中" : "等待结果", color: context.isError ? "error" : "warning" },
 				];
-				const elapsed = animating ? formatLiveElapsed(getElapsedMs(row, context.executionStarted)) : "";
-				if (elapsed) metrics.push({ text: elapsed, color: "dim" });
+				const elapsedMs = animating ? getElapsedMs(row, context.executionStarted) : undefined;
+				const elapsed = animating ? formatLiveElapsed(elapsedMs ?? 0) : "";
+				if (elapsed) metrics.push({ text: elapsed, color: durationColor(elapsedMs) });
 
 				const pendingLine = headerLine(theme, {
 					name,
 					args: row.args,
 					cwd: context.cwd,
-					symbol: context.isError ? "×" : animating ? spinnerFrame(row) : "◐",
+					symbol: context.isError ? "×" : animating ? activeSymbol(row, context.executionStarted) : "◐",
 					statusColor: context.isError ? "error" : "warning",
 					railColor: context.isError ? "error" : "warning",
 					railPulse: animating && railPulse(row),
@@ -815,7 +1092,8 @@ export default function (pi: ExtensionAPI): void {
 			},
 			renderResult(result, options, theme, context) {
 				const row = getRow(context);
-				const isError = Boolean(result.isError || context.isError);
+				const details = result.details as ResultDetails | undefined;
+				const isError = Boolean(result.isError || context.isError || (webAccess && !options.isPartial && typeof details?.error === "string" && details.error));
 
 				// A native timer may stay active after a tool was expanded during execution.
 				// Pass it the final result even if the row has been collapsed in the meantime.
@@ -847,7 +1125,7 @@ export default function (pi: ExtensionAPI): void {
 				const args = row.args ?? (context.args as Record<string, unknown> | undefined);
 				const lines = codemode
 					? buildCodemodeLines(args, result, context, theme, row)
-					: buildToolLines(name, args, result, context, theme, fffSearch, row);
+					: buildToolLines(name, args, result, context, theme, fffSearch, webAccess, row);
 				return new CompactLines(lines, context.outputPad, animating ? () => scheduleAnimation(row) : undefined);
 			},
 		};

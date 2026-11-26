@@ -27,6 +27,7 @@ function toolRow(name, args, { ui = { requestRender() {} }, definition = decorat
 
 test("built-ins use transparent self-framed single-line layout when settled and drop background slabs", () => {
 	const bgToken = theme.getBgAnsi("toolSuccessBg");
+	const padName = (name) => name.length < 8 ? name.padEnd(8) : name;
 	for (const name of builtIns) {
 		const shell = name === "bash" || name === "powershell";
 		const subject = shell ? "echo Chinese-output" : "中文-文件.txt";
@@ -36,15 +37,15 @@ test("built-ins use transparent self-framed single-line layout when settled and 
 		// Pending & running before result: 1 clean line (plus Pi's single leading blank separator)
 		const pendingRaw = row.render(90);
 		assert.equal(pendingRaw.length, 2, name + " pending total rows");
-		assert.deepEqual(plain(pendingRaw), [`▏ ⠋ ${name}  ${subject}  · 等待结果`]);
+		assert.deepEqual(plain(pendingRaw), [`▏ · ${padName(name)}  ${subject}  · 等待结果`]);
 
 		row.markExecutionStarted();
-		assert.deepEqual(plain(row.render(90)), [`▏ ⠋ ${name}  ${subject}  · 运行中`]);
+		assert.deepEqual(plain(row.render(90)), [`▏ ⠋ ${padName(name)}  ${subject}  · 运行中`]);
 
-		// Streaming shell shows live output on 2nd branch line; other tools stay compact
+		// Streaming shell shows live output on 2nd branch line and live line count; other tools stay compact
 		row.updateResult(result("测试实时输出"), true);
 		if (shell) {
-			assert.deepEqual(plain(row.render(90)), [`▏ ⠋ ${name}  ${subject}  · 运行中`, "▏   └─ 测试实时输出"]);
+			assert.deepEqual(plain(row.render(90)), [`▏ ⠋ ${padName(name)}  ${subject}  · 运行中 · 1 行`, "▏   └─ 测试实时输出"]);
 		} else {
 			assert.equal(plain(row.render(90)).length, 1, name + " partial");
 		}
@@ -54,7 +55,7 @@ test("built-ins use transparent self-framed single-line layout when settled and 
 		const settledRaw = row.render(90);
 		assert.equal(settledRaw.length, 2, name + " settled total rows (1 blank + 1 line)");
 		assert.equal(plain(settledRaw).length, 1, name + " settled content lines");
-		assert.match(plain(settledRaw)[0], new RegExp(`^▏ ✓ ${name}  `));
+		assert.match(plain(settledRaw)[0], new RegExp(`^▏ ✓ ${padName(name)}  `));
 		assert.match(plain(settledRaw)[0], /42ms$/);
 		if (bgToken) {
 			assert.ok(!settledRaw.join("\n").includes(bgToken), name + " should not paint toolSuccessBg when collapsed");
@@ -66,33 +67,33 @@ test("per-tool smart metrics, colored diff stats, relative paths and tail-preser
 	// read with relative cwd shortening + line count + duration
 	const readRow = toolRow("read", { path: join(paths.cwd, "sub", "中文.ts"), offset: 10, limit: 25 });
 	readRow.updateResult(result("l1\nl2\nl3", { durationMs: 12 }));
-	assert.deepEqual(plain(readRow.render(90)), ["▏ ✓ read  sub/中文.ts:10-34  · 3 行 · 12ms"]);
+	assert.deepEqual(plain(readRow.render(90)), ["▏ ✓ read      sub/中文.ts:10-34  · 3 行 · 12ms"]);
 
 	// edit with colored +added / -removed diff counts
 	const editRow = toolRow("edit", { path: join(paths.cwd, "src", "app.ts"), edits: [{ oldText: "a", newText: "b" }] });
 	editRow.updateResult(result("ok", { details: { diff: "- 1 old1\n- 2 old2\n+ 1 new1\n+ 2 new2\n+ 3 new3" }, durationMs: 18 }));
 	const editRaw = editRow.render(90).join("\n");
-	assert.deepEqual(plain(editRow.render(90)), ["▏ ✓ edit  src/app.ts  · +3 · −2 · 18ms"]);
+	assert.deepEqual(plain(editRow.render(90)), ["▏ ✓ edit      src/app.ts  · +3 · −2 · 18ms"]);
 	assert.ok(editRaw.includes(theme.fg("toolDiffAdded", "+3")));
 	assert.ok(editRaw.includes(theme.fg("toolDiffRemoved", "−2")));
 
 	// write with line count and KB size
 	const writeRow = toolRow("write", { path: "notes.md", content: "x".repeat(2048) + "\nsecond" });
 	writeRow.updateResult(result("ok", { durationMs: 5 }));
-	assert.deepEqual(plain(writeRow.render(90)), ["▏ ✓ write  notes.md  · 2 行 · 2.0 KB · 5ms"]);
+	assert.deepEqual(plain(writeRow.render(90)), ["▏ ✓ write     notes.md  · 2 行 · 2.0 KB · 5ms"]);
 
 	// grep / find / ls counts
 	const grepRow = toolRow("grep", { path: "src", pattern: "renderShell" });
 	grepRow.updateResult(result("a.ts:1:renderShell\nb.ts:4:renderShell"));
-	assert.deepEqual(plain(grepRow.render(90)), ['▏ ✓ grep  "renderShell"  src  · 2 处匹配']);
+	assert.deepEqual(plain(grepRow.render(90)), ['▏ ✓ grep      "renderShell"  src  · 2 处匹配']);
 
 	const findRow = toolRow("find", { path: ".", pattern: "*.ts" });
 	findRow.updateResult(result("a.ts\nb.ts\nc.ts"));
-	assert.deepEqual(plain(findRow.render(90)), ['▏ ✓ find  "*.ts"  · 3 个文件']);
+	assert.deepEqual(plain(findRow.render(90)), ['▏ ✓ find      "*.ts"  · 3 个文件']);
 
 	const lsRow = toolRow("ls", { path: "." });
 	lsRow.updateResult(result("a.ts\nb.ts"));
-	assert.deepEqual(plain(lsRow.render(90)), ["▏ ✓ ls  .  · 2 项"]);
+	assert.deepEqual(plain(lsRow.render(90)), ["▏ ✓ ls        .  · 2 项"]);
 
 	// Deep path preserves basename when truncated
 	const deepPath = "very/deeply/nested/workspace/directory/structure/components/tool-execution.js";
@@ -101,6 +102,34 @@ test("per-tool smart metrics, colored diff stats, relative paths and tail-preser
 	const narrow = plain(deepRow.render(48))[0];
 	assert.match(narrow, /…\/.*tool-execution\.js/);
 	assert.ok(tui.visibleWidth(deepRow.render(48)[1]) <= 48);
+});
+
+test("renders bash displaySummary, OSC 8 file hyperlinks, and duration color tiers", () => {
+	const bashRow = toolRow("bash", { command: "npm --prefix pi-tool-ui test", displaySummary: "运行测试套件" });
+	bashRow.updateResult(result("ok\nok", { durationMs: 6200 }));
+	const bashRaw = bashRow.render(90).join("\n");
+	assert.deepEqual(plain(bashRow.render(90)), ["▏ ✓ bash      运行测试套件  · 2 行 · 6.2s"]);
+	assert.ok(bashRaw.includes(theme.fg("warning", "6.2s")), "slow calls (>=5s) should tint duration warning");
+
+	const mediumRow = toolRow("read", { path: "中文-一.txt" });
+	mediumRow.updateResult(result("line 1", { durationMs: 1800 }));
+	assert.ok(mediumRow.render(90).join("\n").includes(theme.fg("muted", "1.8s")));
+
+	const caps = tui.getCapabilities();
+	tui.setCapabilities({ ...caps, hyperlinks: true });
+	try {
+		const linked = toolRow("read", { path: "中文-一.txt", offset: 1, limit: 2 });
+		linked.updateResult(result("a\nb"));
+		const line = linked.render(90)[1];
+		assert.ok(line.includes(pathToFileURL(join(paths.cwd, "中文-一.txt")).href), "file path should emit OSC 8 hyperlink");
+		assert.ok(line.includes(theme.fg("accent", ":1-2")), "read line range should use accent color");
+
+		const globSearch = toolRow("grep", { path: "src/**/*.ts", pattern: "foo" });
+		globSearch.updateResult(result("src/a.ts:1:foo"));
+		assert.ok(!globSearch.render(90)[1].includes("\x1b]8;;"), "glob paths must not emit file:// hyperlinks");
+	} finally {
+		tui.setCapabilities(caps);
+	}
 });
 
 test("FFF search results use the compact layout with the original expanded renderers", async () => {
@@ -128,7 +157,7 @@ test("FFF search results use the compact layout with the original expanded rende
 		const args = { pattern: "needle", path: "src" };
 		const row = toolRow(name, args, { definition: renderer(name, () => base) });
 		row.updateResult(value);
-		assert.deepEqual(plain(row.render(100)), [`▏ ✓ ${name}  "needle"  src  · ${summary}`]);
+		assert.deepEqual(plain(row.render(100)), [`▏ ✓ ${name.padEnd(8)}  "needle"  src  · ${summary}`]);
 		assert.ok(!row.render(100).some((line) => line.includes(theme.getBgAnsi("toolSuccessBg"))));
 		row.setExpanded(true);
 		const reference = toolRow(name, args, { definition: base });
@@ -143,6 +172,65 @@ test("FFF search results use the compact layout with the original expanded rende
 	source = "npm:some-other-search-package";
 	assert.equal(renderer("ffgrep", () => base), base);
 	assert.equal(renderer("find", () => base), base);
+});
+
+test("pi-web-access and builtin tool_search use transparent compact rows while preserving curator hints and expanded views", async () => {
+	const { createExtensionRuntime, loadExtensions } = await importPi("core/extensions/loader.js");
+	const runtime = createExtensionRuntime();
+	let webSource = "npm:pi-web-access@0.48.0";
+	runtime.getAllTools = () => [
+		{ name: "web_search", sourceInfo: { source: webSource } },
+		{ name: "fetch_content", sourceInfo: { source: webSource } },
+		{ name: "get_search_content", sourceInfo: { source: webSource } },
+		{ name: "source_check", sourceInfo: { source: webSource } },
+		{ name: "tool_search", sourceInfo: { path: "builtin:tool-search" } },
+	];
+	const loaded = await loadExtensions([join(packageDir, "index.ts")], paths.cwd, undefined, runtime);
+	assert.deepEqual(loaded.errors, []);
+	const [renderer] = loaded.extensions[0].toolRenderers;
+	const base = {
+		renderCall: () => new tui.Text("WEB CALL", 0, 0),
+		renderResult: (value) => new tui.Text(value.content[0].text, 0, 0),
+	};
+
+	const ws = toolRow("web_search", { queries: ["Pi themes", "Pi TUI", "Pi extensions"] }, { definition: renderer("web_search", () => base) });
+	ws.markExecutionStarted();
+	ws.updateResult(result("waiting", { details: { phase: "curating", curatorUrl: "http://127.0.0.1:4321", shortcut: "ctrl+shift+w" } }), true);
+	const curating = plain(ws.render(100));
+	assert.match(curating[0], /^▏ ⠋ web_search  "Pi themes" \+2  · 等待确认/);
+	assert.match(curating[1], /http:\/\/127\.0\.0\.1:4321.*ctrl\+shift\+w 重开/);
+
+	const wsDone = result("Full web search results", { details: { queryCount: 3, successfulQueries: 3, totalResults: 14, summary: { text: "ok" } }, durationMs: 1800 });
+	ws.updateResult(wsDone);
+	assert.deepEqual(plain(ws.render(100)), ['▏ ✓ web_search  "Pi themes" +2  · 3/3 组 · 14 来源 · 已摘要 · 1.8s']);
+	assert.ok(!ws.render(100).some((line) => line.includes(theme.getBgAnsi("toolSuccessBg"))));
+	ws.setExpanded(true);
+	const wsRef = toolRow("web_search", { queries: ["Pi themes", "Pi TUI", "Pi extensions"] }, { definition: base });
+	wsRef.updateResult(wsDone);
+	wsRef.setExpanded(true);
+	assert.deepEqual(ws.render(100), wsRef.render(100));
+
+	const fetchRow = toolRow("fetch_content", { url: "https://www.github.com/earendil-works/pi" }, { definition: renderer("fetch_content", () => base) });
+	fetchRow.updateResult(result("page", { details: { urlCount: 1, totalChars: 12400, imageCount: 2, truncated: true }, durationMs: 900 }));
+	assert.deepEqual(plain(fetchRow.render(100)), ["▏ ✓ fetch_content  github.com/earendil-works/pi  · 12.4k 字 · 2 图 · 截断 · 900ms"]);
+
+	const getRow = toolRow("get_search_content", { responseId: "abc123456", findText: "renderShell" }, { definition: renderer("get_search_content", () => base) });
+	getRow.updateResult(result("matched", { details: { matchCount: 4, returnedMatches: 4 } }));
+	assert.deepEqual(plain(getRow.render(100)), ['▏ ✓ get_search_content  "renderShell"  · 4 处匹配']);
+
+	// source_check and tool_search do not supply custom renderCall/renderResult on base
+	const toolSearchRow = toolRow("tool_search", { query: "calendar" }, { definition: renderer("tool_search", () => ({ name: "tool_search" })) });
+	toolSearchRow.updateResult(result("Loaded 2 tools", { details: { loaded: ["gcal_list", "gcal_create"] }, durationMs: 3 }));
+	assert.deepEqual(plain(toolSearchRow.render(100)), ['▏ ✓ tool_search  "calendar"  · 加载 2 个工具 · 3ms']);
+	toolSearchRow.setExpanded(true);
+	assert.match(plain(toolSearchRow.render(100)).join("\n"), /Loaded 2 tools/);
+
+	const sourceCheckRow = toolRow("source_check", { claim: "Pi uses OKHSL" }, { definition: renderer("source_check", () => ({ name: "source_check" })) });
+	sourceCheckRow.updateResult(result("Evidence passage"));
+	assert.deepEqual(plain(sourceCheckRow.render(100)), ['▏ ✓ source_check  "Pi uses OKHSL"  · 已核查']);
+
+	webSource = "npm:other-web-package";
+	assert.equal(renderer("web_search", () => base), base);
 });
 
 test("animates waiting and running rows with spinner, breathing rail, live elapsed time, and clean stop", async () => {
@@ -163,21 +251,20 @@ test("animates waiting and running rows with spinner, breathing rail, live elaps
 	const initial = row.render(90);
 	frames.push(plain(initial)[0]);
 	rawLines.push(initial[1]);
-	assert.equal(frames[0], "▏ ⠋ bash  sleep 1  · 等待结果");
+	assert.equal(frames[0], "▏ · bash      sleep 1  · 等待结果");
 
-	// Wait across several 100ms animation ticks to verify smooth frame progression and breathing rail
-	await sleep(450);
+	// Waiting uses gentle breathing dots (· -> • -> ●) and pulsing rail without width jitter
+	await sleep(480);
 	assert.ok(renders >= 3, `expected >= 3 animation ticks, got ${renders}`);
-	assert.ok(frames.some((line) => line.startsWith("▏ ⠙ bash")), frames.join("\n"));
-	assert.ok(frames.some((line) => line.startsWith("▏ ⠹ bash")), frames.join("\n"));
-	assert.ok(frames.some((line) => line.startsWith("▏ ⠸ bash")), frames.join("\n"));
+	assert.ok(frames.some((line) => line.startsWith("▏ • bash")), frames.join("\n"));
+	assert.ok(frames.some((line) => line.startsWith("▏ ● bash")), frames.join("\n"));
 	const widths = new Set(rawLines.map((line) => tui.visibleWidth(line)));
-	assert.equal(widths.size, 1, "spinner animation must not shift line width");
+	assert.equal(widths.size, 1, "waiting animation must not shift line width");
 	const dimRail = `\x1b[2m${theme.fg("warning", "▏")}\x1b[22m`;
 	assert.ok(rawLines.some((line) => !line.includes(dimRail)), "rail should pulse bright on part of cycle");
 	assert.ok(rawLines.some((line) => line.includes(dimRail)), "rail should pulse dim on part of cycle");
 
-	// Verify live elapsed seconds appear after 1s while waiting, then reset on execution start
+	// Verify live elapsed seconds appear after 1s while waiting, then reset and switch to Braille spinner on execution start
 	const realNow = Date.now;
 	let offset = 2400;
 	Date.now = () => realNow() + offset;
@@ -185,11 +272,13 @@ test("animates waiting and running rows with spinner, breathing rail, live elaps
 		row.invalidate();
 		assert.match(plain(row.render(90))[0], /等待结果 · 2s$/);
 		row.markExecutionStarted();
-		assert.match(plain(row.render(90))[0], /运行中$/);
+		const runningLine = plain(row.render(90))[0];
+		assert.match(runningLine, /^▏ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] bash/);
+		assert.match(runningLine, /运行中$/);
 		offset += 3100;
 		row.updateResult(result("仍在运行"), true);
 		const live = plain(row.render(90));
-		assert.match(live[0], /运行中 · 3s$/);
+		assert.match(live[0], /运行中 · 1 行 · 3s$/);
 		assert.equal(live[1], "▏   └─ 仍在运行");
 	} finally {
 		Date.now = realNow;
@@ -207,7 +296,7 @@ test("animates waiting and running rows with spinner, breathing rail, live elaps
 
 	// Settling stops the animation completely
 	row.updateResult(result("完成输出", { durationMs: 420 }));
-	assert.deepEqual(plain(row.render(90)), ["▏ ✓ bash  sleep 1  · 1 行 · 420ms"]);
+	assert.deepEqual(plain(row.render(90)), ["▏ ✓ bash      sleep 1  · 1 行 · 420ms"]);
 	const rendersAfterSettle = renders;
 	await sleep(250);
 	assert.equal(renders, rendersAfterSettle, "animation must stop after settling");
@@ -343,6 +432,9 @@ test("codemode collapses clean runs to one breakdown line and surfaces nested or
 	row.updateResult({ content: [], details: { calls: [{ name: "read", args: "{}", status: "running" }] } }, true);
 	assert.deepEqual(plain(row.render(80)), ["▏ ⠋ codemode  read  · 1 次 · 正在执行 read"]);
 
+	row.updateResult({ content: [], details: { calls: [{ name: "read", args: '{"path":"src/app.ts"}', status: "running" }] } }, true);
+	assert.deepEqual(plain(row.render(80)), ["▏ ⠋ codemode  read  · 1 次 · 正在执行 read", "▏   └─ read  src/app.ts"]);
+
 	row.updateResult(cleanOutcome);
 	assert.deepEqual(plain(row.render(80)), ["▏ ✓ codemode  read×2, ls, bash  · 4 次 · 140ms"]);
 
@@ -442,7 +534,7 @@ test("native fullscreen hit testing opens adjacent calls independently and follo
 	click("fixture live command");
 	assert.equal(c.expanded, false);
 	c.updateResult(result("流式第一行\n流式最终输出", { durationMs: 320 }));
-	assert.match(frame().join("\n"), /▏ ✓ bash  fixture live command  · 2 行 · 320ms/);
+	assert.match(frame().join("\n"), /▏ ✓ bash      fixture live command  · 2 行 · 320ms/);
 	assert.equal(c.expanded, false);
 
 	renderer.handleViewportInput("\x1b[1;5H");
