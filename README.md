@@ -1,42 +1,70 @@
-# Pi 工具 UI
+# pi-tool-ui
 
-适用于 Pi 1.6.1 的本地工具显示包。收起时采用透明无底框的极简细竖线布局：等待与运行中带有顺滑旋转指示、轻呼吸竖线及实时耗时；常规完成调用压缩为单行，自带路径精简、文件行数、diff 增删数、子调用汇总和耗时；仅在出错、流式运行中、截断全文或图片兼容提示时展开第二行分枝。
+`pi-tool-ui` 是适用于 **Pi 1.6.1** 的工具视图扩展。收起时用透明的单行摘要显示状态、路径或命令，以及耗时、命中数等信息。需要看原文时，可以展开同一条调用，查看工具原有的完整输出、diff 或图片。
 
 ```text
- ▏ ✓ read  pi-tool-ui/index.ts:1-80  · 80 行 · 12ms
- ▏ ✓ edit  pi-tool-ui/index.ts  · +14 · −6 · 18ms
+ ▏ ✓ read  src/index.ts:1-80  · 80 行 · 12ms
+ ▏ ✓ edit  src/index.ts  · +14 · −6 · 18ms
+ ▏ ✓ ffgrep  "renderShell"  src  · 3 处匹配 · 42ms
  ▏ ✓ codemode  read×2, ls×2, bash  · 5 次 · 0.2s
- ▏ × read  测试-不存在.txt
+ ▏ ⠋ bash  npm test  · 运行中 · 3s
+ ▏   └─ Running rendering tests…
+ ▏ × read  missing.txt
  ▏   └─ ENOENT: no such file or directory, …
 ```
 
-- 支持 Pi 原生的 `read`、`bash`、`powershell`、`edit`、`write`、`grep`、`find`、`ls` 和 `codemode`。收起的 `codemode` 展示子调用分布与耗时，失败时在第二行显示真实错误；展开可看完整脚本、子调用和输出。MCP、提问和 subagent 沿用各自的 renderer。
-- 通过 npm 安装 `@ff-labs/pi-fff` 时，`ffgrep` 和 `fffind` 的收起态也会显示透明单行摘要。展开后由 FFF 显示完整命中和翻页提示。
-- 通过 Pi 1.6.1 原生 `renderShell: "self"` 去掉收起态的大面积底色框和上下空行，不修改 `Container`、`ScrollView`、`MouseRegion` 或 `setExpanded`。
-- `Ctrl+O` 是 Pi 1.6.1 默认的展开快捷键，实际按键以用户配置为准。Fullscreen 下也可以点击调用行。展开后恢复 Pi 原生底框、输出、diff 和图片。Regular 的滚动回看由终端宿主管理，fullscreen 的视口与 `Ctrl+End` 由 Pi 管理。
-- 收起时按终端列宽裁剪，长路径优先保留文件名。结果被工具截断时会显示提示；支持 OSC 8 的终端可以从「全文」进入原生 Bash 或 PowerShell 保存的输出文件。
+## 功能
 
-## 隔离试用
+- **紧凑工具行。** 常规完成只显示一行。错误详情、Shell 实时输出、输出保存位置和图片兼容提示可在下方另起一行。
+- **实时状态。** 收起时用旋转指示和细竖线明暗变化提示任务正在等待或运行。从一秒起显示实时计时，完成后显示 Pi 记录的实际耗时。
+- **适应终端宽度。** 使用 Pi 的主题色与字符宽度规则，路径尽量相对工作目录显示，长路径裁剪时优先保留文件名。
+- **可访问的完整输出。** 工具报告截断时显示提示。若 Pi 已将完整输出保存到文件，支持 OSC 8 的终端可点击「全文」，也可以展开查看路径。
 
-在仓库目录中运行以下任一命令。试用使用临时 Pi 配置和离线示例，不需要模型账号。按 `Ctrl+D` 退出即可回到原终端。
+## 支持的工具
 
-```powershell
+| 来源 | 工具 | 收起摘要 |
+| --- | --- | --- |
+| Pi 内置 | `read` | 文件路径、请求行号范围、行数或图片类型 |
+| Pi 内置 | `edit`、`write` | 文件路径、diff 增删行数、写入行数与较大文件的大小 |
+| Pi 内置 | `bash`、`powershell` | 命令、输出行数、运行中的最新输出、退出码或错误 |
+| Pi 内置 | `grep`、`find`、`ls` | 查询范围、匹配或结果数量、无结果与截断提示 |
+| Pi 内置 | `codemode` | 子调用类型与数量、执行进度、脚本或子调用失败。展开可查看脚本、调用详情和输出 |
+| `npm:@ff-labs/pi-fff` | `ffgrep`、`fffind`，以及 FFF 的 `override` 模式下的 `grep`、`find` | FFF 提供的命中数、翻页、近似匹配或正则表达式回退提示。展开使用 FFF 的原始视图 |
+
+MCP、提问、subagent 和其他第三方工具由各自的扩展渲染。工具执行、参数、结构化输出和会话记录由 Pi 与原工具负责，例如 `codemode` 仍可收到 Bash 的结构化结果和 `read` 返回的图片对象。
+
+## 兼容与交互
+
+- **Pi 版本。** 适配并验证 Pi 1.6.1，使用 `pi.registerToolRenderer()` 接入。FFF 的实测版本为 0.11.0。
+- **Fullscreen。** 可点击工具行独立展开，也可用 `Ctrl+O` 全局展开或收起。滚动和 `Ctrl+End` 沿用 Pi 的视口行为。
+- **Regular。** 用 `Ctrl+O` 展开或收起，滚动回看由终端宿主管理。实际快捷键以 Pi 的 `app.tools.expand` 绑定为准。
+- **图片预览。** Pi 的内联图片遵循 `terminal.showImages` 和终端图形支持情况。支持内联图片的终端在收起文本摘要后仍可显示图片。关闭 `terminal.showImages` 只影响终端预览，模型接收图片由 `images.blockImages` 控制。
+
+两种终端模式均已在 **Windows 的 Orca** 环境验证。自动化测试还覆盖中文窄屏、错误摘要、截断链接、原生展开、鼠标命中、流式输出以及 `codemode` 结构化结果。
+
+## 安装
+
+在 Pi 1.6.1 环境中安装 GitHub 仓库。私有仓库需要当前 Git 登录账号具有读取权限。
+
+```sh
+pi install git:github.com/yearsadrift/pi-tool-ui
+```
+
+也可以克隆到本地，再从仓库的父目录安装。
+
+```sh
+git clone https://github.com/yearsadrift/pi-tool-ui.git
+pi install ./pi-tool-ui
+```
+
+在当前 Pi 会话执行 `/reload` 生效。若已有其他扩展负责同一批工具的外观，可在 `pi config` 中关闭其工具显示入口。卸载时运行 `pi remove`，参数使用 `pi list` 中显示的安装来源，然后执行 `/reload`。
+
+## 本地试用与测试
+
+在仓库目录运行以下命令。演示使用临时 Pi 配置和离线示例，按 `Ctrl+D` 退出。试用和测试默认查找 Pi 托管安装中的 1.6.1。其他环境可将 `PI_TOOL_UI_PI_ROOT` 设为 `@earendil-works/pi-coding-agent` 1.6.1 的包目录，该目录应包含 `dist`，并能解析同一套安装的 `@earendil-works/pi-tui`。
+
+```sh
 npm run demo -- fullscreen
 npm run demo -- regular
-```
-
-试用和测试默认使用 Pi 托管安装中的 1.6.1。其他安装方式可将 `PI_TOOL_UI_PI_ROOT` 指向包含 `dist` 的 `@earendil-works/pi-coding-agent` 1.6.1 包目录，并使用该安装的 `@earendil-works/pi-tui`。
-
-## 验证
-
-```powershell
 npm test
 ```
-
-测试使用 Pi 1.6.1 的组件、扩展加载器、工具执行路径和 QuickJS codemode。覆盖透明单行与自适应双行、窄屏中文、出错和截断、原生展开对照、PNG、同名覆盖与专用 renderer，以及 fullscreen 中的点击、流式更新和 `Ctrl+End`。
-
-## 启用与回退
-
-正式切换前备份 Pi 配置并保存 `/pi-health` 快照。在需要的配置范围内停用其他工具显示扩展的入口，然后运行 `pi install ./pi-tool-ui`，或将本地仓库的绝对路径加入 Pi 设置的 `packages`。执行 `/reload` 后检查扩展加载列表，确认工具视图和现有状态栏正常，再与切换前的体检快照比较。
-
-回退时从同一配置范围移除该本地包路径，恢复原先使用的工具显示扩展，再执行 `/reload`。试用标签页使用独立配置，退出后由脚本清理其临时文件。
