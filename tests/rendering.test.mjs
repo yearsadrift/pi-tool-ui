@@ -40,12 +40,12 @@ test("built-ins use transparent self-framed single-line layout when settled and 
 		assert.deepEqual(plain(pendingRaw), [`▏ · ${padName(name)}  ${subject}  · 等待结果`]);
 
 		row.markExecutionStarted();
-		assert.deepEqual(plain(row.render(90)), [`▏ ⠋ ${padName(name)}  ${subject}  · 运行中`]);
+		assert.deepEqual(plain(row.render(90)), [`▏ · ${padName(name)}  ${subject}  · 运行中`]);
 
 		// Streaming shell shows live output on 2nd branch line and live line count; other tools stay compact
 		row.updateResult(result("测试实时输出"), true);
 		if (shell) {
-			assert.deepEqual(plain(row.render(90)), [`▏ ⠋ ${padName(name)}  ${subject}  · 运行中 · 1 行`, "▏   └─ 测试实时输出"]);
+			assert.deepEqual(plain(row.render(90)), [`▏ · ${padName(name)}  ${subject}  · 运行中 · 1 行`, "▏   └─ 测试实时输出"]);
 		} else {
 			assert.equal(plain(row.render(90)).length, 1, name + " partial");
 		}
@@ -109,11 +109,25 @@ test("renders bash displaySummary, OSC 8 file hyperlinks, and duration color tie
 	bashRow.updateResult(result("ok\nok", { durationMs: 6200 }));
 	const bashRaw = bashRow.render(90).join("\n");
 	assert.deepEqual(plain(bashRow.render(90)), ["▏ ✓ bash      运行测试套件  · 2 行 · 6.2s"]);
+	assert.ok(bashRaw.includes(theme.fg("bashMode", theme.bold("bash    "))), "shell title should use bashMode semantic color");
 	assert.ok(bashRaw.includes(theme.fg("warning", "6.2s")), "slow calls (>=5s) should tint duration warning");
 
 	const mediumRow = toolRow("read", { path: "中文-一.txt" });
 	mediumRow.updateResult(result("line 1", { durationMs: 1800 }));
-	assert.ok(mediumRow.render(90).join("\n").includes(theme.fg("muted", "1.8s")));
+	const readRaw = mediumRow.render(90).join("\n");
+	assert.ok(readRaw.includes(theme.fg("mdLink", theme.bold("read    "))), "read title should use mdLink semantic color");
+	assert.ok(readRaw.includes(`\x1b[2m${theme.fg("mdLink", "▏")}\x1b[22m`), "settled rail should tint softly by tool category");
+	assert.ok(readRaw.includes(theme.fg("muted", "1.8s")));
+
+	const editColored = toolRow("edit", { path: "中文-一.txt", edits: [{ oldText: "a", newText: "b" }] });
+	editColored.updateResult(result("ok"));
+	assert.ok(editColored.render(90).join("\n").includes(theme.fg("syntaxString", theme.bold("edit    "))));
+
+	const grepColored = toolRow("grep", { path: "src", pattern: "needle" });
+	grepColored.updateResult(result("src/a.ts:1:needle"));
+	const grepRaw = grepColored.render(90).join("\n");
+	assert.ok(grepRaw.includes(theme.fg("syntaxVariable", theme.bold("grep    "))));
+	assert.ok(grepRaw.includes(theme.fg("syntaxString", '"needle"')));
 
 	const caps = tui.getCapabilities();
 	tui.setCapabilities({ ...caps, hyperlinks: true });
@@ -197,7 +211,7 @@ test("pi-web-access and builtin tool_search use transparent compact rows while p
 	ws.markExecutionStarted();
 	ws.updateResult(result("waiting", { details: { phase: "curating", curatorUrl: "http://127.0.0.1:4321", shortcut: "ctrl+shift+w" } }), true);
 	const curating = plain(ws.render(100));
-	assert.match(curating[0], /^▏ ⠋ web_search  "Pi themes" \+2  · 等待确认/);
+	assert.match(curating[0], /^▏ · web_search  "Pi themes" \+2  · 等待确认/);
 	assert.match(curating[1], /http:\/\/127\.0\.0\.1:4321.*ctrl\+shift\+w 重开/);
 
 	const wsDone = result("Full web search results", { details: { queryCount: 3, successfulQueries: 3, totalResults: 14, summary: { text: "ok" } }, durationMs: 1800 });
@@ -260,11 +274,11 @@ test("animates waiting and running rows with spinner, breathing rail, live elaps
 	assert.ok(frames.some((line) => line.startsWith("▏ ● bash")), frames.join("\n"));
 	const widths = new Set(rawLines.map((line) => tui.visibleWidth(line)));
 	assert.equal(widths.size, 1, "waiting animation must not shift line width");
-	const dimRail = `\x1b[2m${theme.fg("warning", "▏")}\x1b[22m`;
+	const dimRail = `\x1b[2m${theme.fg("accent", "▏")}\x1b[22m`;
 	assert.ok(rawLines.some((line) => !line.includes(dimRail)), "rail should pulse bright on part of cycle");
 	assert.ok(rawLines.some((line) => line.includes(dimRail)), "rail should pulse dim on part of cycle");
 
-	// Verify live elapsed seconds appear after 1s while waiting, then reset and switch to Braille spinner on execution start
+	// Verify live elapsed seconds appear after 1s while waiting, then reset and keep unified pulse dots in warning color on execution start
 	const realNow = Date.now;
 	let offset = 2400;
 	Date.now = () => realNow() + offset;
@@ -272,9 +286,11 @@ test("animates waiting and running rows with spinner, breathing rail, live elaps
 		row.invalidate();
 		assert.match(plain(row.render(90))[0], /等待结果 · 2s$/);
 		row.markExecutionStarted();
-		const runningLine = plain(row.render(90))[0];
-		assert.match(runningLine, /^▏ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] bash/);
+		const runningRaw = row.render(90)[1];
+		const runningLine = plain([runningRaw])[0];
+		assert.match(runningLine, /^▏ [·•●] bash/);
 		assert.match(runningLine, /运行中$/);
+		assert.ok(runningRaw.includes(theme.fg("warning", "运行中")), "running state should switch to warning color");
 		offset += 3100;
 		row.updateResult(result("仍在运行"), true);
 		const live = plain(row.render(90));
@@ -430,10 +446,10 @@ test("codemode collapses clean runs to one breakdown line and surfaces nested or
 	};
 	row.markExecutionStarted();
 	row.updateResult({ content: [], details: { calls: [{ name: "read", args: "{}", status: "running" }] } }, true);
-	assert.deepEqual(plain(row.render(80)), ["▏ ⠋ codemode  read  · 1 次 · 正在执行 read"]);
+	assert.deepEqual(plain(row.render(80)), ["▏ · codemode  read  · 1 次 · 正在执行 read"]);
 
 	row.updateResult({ content: [], details: { calls: [{ name: "read", args: '{"path":"src/app.ts"}', status: "running" }] } }, true);
-	assert.deepEqual(plain(row.render(80)), ["▏ ⠋ codemode  read  · 1 次 · 正在执行 read", "▏   └─ read  src/app.ts"]);
+	assert.deepEqual(plain(row.render(80)), ["▏ · codemode  read  · 1 次 · 正在执行 read", "▏   └─ read  src/app.ts"]);
 
 	row.updateResult(cleanOutcome);
 	assert.deepEqual(plain(row.render(80)), ["▏ ✓ codemode  read×2, ls, bash  · 4 次 · 140ms"]);

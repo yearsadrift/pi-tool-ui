@@ -34,8 +34,7 @@ const shellStatusPattern = /^Command (?:exited with code (\d+)|timed out after .
 const shellFooterPattern = /^\[Showing (?:lines |last ).+?\. (?:Full output: (.+)|Could not save the full output: (.+))\]$/;
 const genericFooterPattern = /^\[(?:Showing lines |Truncated |Matches truncated|Results truncated|Entries truncated|Line \d+ is )/;
 const rowState = Symbol("pi-tool-ui row");
-const waitingFrames = ["·", "·", "•", "•", "●", "●", "•", "•", "·", "·"];
-const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const pulseFrames = ["·", "·", "•", "•", "●", "●", "•", "•", "·", "·"];
 const animationIntervalMs = 100;
 const maxMissedAnimationTicks = 2;
 const toolNamePadWidth = 8;
@@ -174,7 +173,7 @@ function tickAnimations(): void {
 			continue;
 		}
 		row.missedTicks = (row.missedTicks ?? 0) + 1;
-		row.frame = ((row.frame ?? 0) + 1) % spinnerFrames.length;
+		row.frame = ((row.frame ?? 0) + 1) % pulseFrames.length;
 		row.ticking = true;
 		try {
 			row.invalidate();
@@ -220,14 +219,13 @@ function stopAnimation(row: RowState): void {
 	}
 }
 
-function activeSymbol(row: RowState, executionStarted: boolean): string {
-	const index = (row.frame ?? 0) % spinnerFrames.length;
-	return executionStarted ? spinnerFrames[index]! : waitingFrames[index]!;
+function activeSymbol(row: RowState): string {
+	return pulseFrames[(row.frame ?? 0) % pulseFrames.length]!;
 }
 
 function railPulse(row: RowState): boolean {
-	const frame = (row.frame ?? 0) % spinnerFrames.length;
-	return frame < 3 || frame >= 8;
+	const frame = (row.frame ?? 0) % pulseFrames.length;
+	return frame >= 2 && frame <= 7;
 }
 
 function getElapsedMs(row: RowState, executionStarted: boolean): number {
@@ -443,6 +441,16 @@ function inferCodemodeTools(code: unknown): string {
 	return names.join(", ");
 }
 
+function toolAccent(name: string): ThemeColor {
+	if (name === "read" || name === "ls") return "mdLink";
+	if (name === "edit" || name === "write") return "syntaxString";
+	if (name === "bash" || name === "powershell") return "bashMode";
+	if (searchTools.has(name) || name === "tool_search") return "syntaxVariable";
+	if (name === "codemode") return "accent";
+	if (webTools.has(name)) return "syntaxType";
+	return "toolTitle";
+}
+
 function railGlyph(theme: Theme, color: ThemeColor, pulse = false): string {
 	return pulse ? theme.fg(color, "▏") : `\x1b[2m${theme.fg(color, "▏")}\x1b[22m`;
 }
@@ -455,13 +463,37 @@ function renderMetrics(theme: Theme, segments: MetricSegment[]): { text: string;
 	return { text, width: visibleWidth(text) };
 }
 
+function styleUrl(displayUrl: string, maxWidth: number, theme: Theme, linkUrl?: string): string {
+	if (maxWidth <= 0) return "";
+	const fitted = truncatePath(displayUrl, maxWidth);
+	const slash = fitted.indexOf("/");
+	const styled = slash >= 0
+		? theme.fg("mdLink", fitted.slice(0, slash)) + theme.fg("muted", fitted.slice(slash))
+		: theme.fg("mdLink", fitted);
+	return linkUrl ? hyperlink(styled, linkUrl) : styled;
+}
+
+function styleCodemodeLabel(label: string, maxWidth: number, theme: Theme): string {
+	const fitted = truncateToWidth(label, maxWidth, "…");
+	let out = "";
+	let last = 0;
+	for (const match of fitted.matchAll(/×\d+|\+\d+/g)) {
+		const index = match.index!;
+		if (index > last) out += theme.fg("toolOutput", fitted.slice(last, index));
+		out += theme.fg("accent", match[0]);
+		last = index + match[0].length;
+	}
+	if (last < fitted.length) out += theme.fg("toolOutput", fitted.slice(last));
+	return out;
+}
+
 function renderQuotedList(items: string[], maxWidth: number, theme: Theme, emptyFallback = "…"): string {
 	if (items.length === 0) return theme.fg("dim", truncateToWidth(emptyFallback, maxWidth, "…"));
 	const extra = items.length > 1 ? ` +${items.length - 1}` : "";
 	const extraWidth = visibleWidth(extra);
 	const keepExtra = extraWidth > 0 && maxWidth > extraWidth + 6;
 	const budget = keepExtra ? maxWidth - extraWidth : maxWidth;
-	const quoted = theme.fg("accent", truncateToWidth(`"${items[0]}"`, budget, "…"));
+	const quoted = theme.fg("syntaxString", truncateToWidth(`"${items[0]}"`, budget, "…"));
 	return keepExtra ? quoted + theme.fg("dim", extra) : quoted;
 }
 
@@ -488,12 +520,12 @@ function renderSubject(
 
 	if (name === "codemode") {
 		const label = codemodeLabel || inferCodemodeTools(args?.code) || "脚本";
-		return theme.fg("toolOutput", truncateToWidth(label, maxWidth, "…"));
+		return styleCodemodeLabel(label, maxWidth, theme);
 	}
 
 	if (name === "tool_search") {
 		const query = oneLine(args?.query);
-		return query ? theme.fg("accent", truncateToWidth(`"${query}"`, maxWidth, "…")) : theme.fg("dim", "…");
+		return query ? theme.fg("syntaxString", truncateToWidth(`"${query}"`, maxWidth, "…")) : theme.fg("dim", "…");
 	}
 
 	if (name === "web_search") {
@@ -502,7 +534,7 @@ function renderSubject(
 
 	if (name === "source_check") {
 		const claim = oneLine(args?.claim);
-		return claim ? theme.fg("accent", truncateToWidth(`"${claim}"`, maxWidth, "…")) : renderQuotedList(extractStringList(undefined, args?.queries), maxWidth, theme);
+		return claim ? theme.fg("syntaxString", truncateToWidth(`"${claim}"`, maxWidth, "…")) : renderQuotedList(extractStringList(undefined, args?.queries), maxWidth, theme);
 	}
 
 	if (name === "fetch_content") {
@@ -512,10 +544,7 @@ function renderSubject(
 		const extraWidth = visibleWidth(extra);
 		const keepExtra = extraWidth > 0 && maxWidth > extraWidth + 6;
 		const budget = keepExtra ? maxWidth - extraWidth : maxWidth;
-		const display = truncatePath(shortenUrl(urls[0]!), budget);
-		const styled = theme.fg("text", display);
-		const webLink = buildWebLink(urls[0]!);
-		const linked = webLink ? hyperlink(styled, webLink) : styled;
+		const linked = styleUrl(shortenUrl(urls[0]!), budget, theme, buildWebLink(urls[0]!));
 		return keepExtra ? linked + theme.fg("dim", extra) : linked;
 	}
 
@@ -523,12 +552,10 @@ function renderSubject(
 		const findTerms = extractStringList(args?.findText, Array.isArray(args?.findText) ? args.findText : undefined);
 		if (findTerms.length > 0) return renderQuotedList(findTerms, maxWidth, theme);
 		const query = oneLine(args?.query);
-		if (query) return theme.fg("accent", truncateToWidth(`"${query}"`, maxWidth, "…"));
+		if (query) return theme.fg("syntaxString", truncateToWidth(`"${query}"`, maxWidth, "…"));
 		const url = oneLine(args?.url);
 		if (url) {
-			const styled = theme.fg("text", truncatePath(shortenUrl(url), maxWidth));
-			const webLink = buildWebLink(url);
-			return webLink ? hyperlink(styled, webLink) : styled;
+			return styleUrl(shortenUrl(url), maxWidth, theme, buildWebLink(url));
 		}
 		const responseId = oneLine(args?.responseId);
 		return theme.fg("dim", truncateToWidth(responseId ? responseId.slice(0, 8) : "…", maxWidth, "…"));
@@ -548,16 +575,16 @@ function renderSubject(
 		if (!pattern) return stylePath(displayPath || ".", "", maxWidth, theme, fileLink);
 		const quoted = `"${pattern}"`;
 		if (!displayPath || displayPath === ".") {
-			return theme.fg("accent", truncateToWidth(quoted, maxWidth, "…"));
+			return theme.fg("syntaxString", truncateToWidth(quoted, maxWidth, "…"));
 		}
 		const patternWidth = visibleWidth(quoted);
 		if (patternWidth + 4 >= maxWidth) {
-			return theme.fg("accent", truncateToWidth(quoted, maxWidth, "…"));
+			return theme.fg("syntaxString", truncateToWidth(quoted, maxWidth, "…"));
 		}
 		const pathBudget = maxWidth - patternWidth - 2;
 		const fittedPath = truncatePath(displayPath, pathBudget);
 		const styledPath = theme.fg("dim", fittedPath);
-		return `${theme.fg("accent", quoted)}  ${fileLink ? hyperlink(styledPath, fileLink) : styledPath}`;
+		return `${theme.fg("syntaxString", quoted)}  ${fileLink ? hyperlink(styledPath, fileLink) : styledPath}`;
 	}
 
 	return stylePath(displayPath || (name === "ls" ? "." : "…"), "", maxWidth, theme, fileLink);
@@ -582,7 +609,7 @@ function headerLine(
 		const paddedName = width >= minAlignedRowWidth && name.length < toolNamePadWidth
 			? name.padEnd(toolNamePadWidth)
 			: name;
-		const basePrefix = `${theme.fg(statusColor, symbol)} ${theme.fg("toolTitle", theme.bold(paddedName))}`;
+		const basePrefix = `${theme.fg(statusColor, symbol)} ${theme.fg(toolAccent(name), theme.bold(paddedName))}`;
 		const rail = width >= visibleWidth(basePrefix) + 2 ? `${railGlyph(theme, railColor, pulse)} ` : "";
 		const prefix = `${rail}${basePrefix}`;
 		const prefixWidth = visibleWidth(prefix);
@@ -664,16 +691,17 @@ function buildCodemodeLines(
 	const lastError = errors.at(-1);
 	const nestedError = lastError ? [oneLine(lastError.name), oneLine(lastError.error)].filter(Boolean).join(" ") : "";
 
-	const symbol = issue ? "×" : animating ? activeSymbol(row, context.executionStarted) : hasNestedError ? "!" : "✓";
-	const statusColor: ThemeColor = issue || hasNestedError ? "error" : context.isPartial ? "warning" : "success";
-	const railColor: ThemeColor = issue || hasNestedError ? "error" : context.isPartial ? "warning" : "dim";
+	const symbol = issue ? "×" : animating ? activeSymbol(row) : hasNestedError ? "!" : "✓";
+	const pendingColor: ThemeColor = context.executionStarted ? "warning" : "accent";
+	const statusColor: ThemeColor = issue || hasNestedError ? "error" : context.isPartial ? pendingColor : "success";
+	const railColor: ThemeColor = issue || hasNestedError ? "error" : context.isPartial ? pendingColor : toolAccent("codemode");
 
 	const breakdown = summarizeCallNames(calls);
 	const codemodeLabel = breakdown || undefined;
 
 	const metrics: MetricSegment[] = [];
 	if (calls.length > 0) {
-		metrics.push({ text: `${calls.length} 次`, color: "dim" });
+		metrics.push({ text: `${calls.length} 次`, color: "muted" });
 	}
 	if (issue) {
 		metrics.push({ text: "脚本失败", color: "error" });
@@ -776,9 +804,10 @@ function buildToolLines(
 	);
 	const image = result.content.find((block) => block.type === "image");
 
-	const symbol = isError ? "×" : animating ? activeSymbol(row, context.executionStarted) : "✓";
-	const statusColor: ThemeColor = isError ? "error" : context.isPartial ? "warning" : "success";
-	const railColor: ThemeColor = isError ? "error" : context.isPartial ? "warning" : "dim";
+	const symbol = isError ? "×" : animating ? activeSymbol(row) : "✓";
+	const pendingColor: ThemeColor = context.executionStarted ? "warning" : "accent";
+	const statusColor: ThemeColor = isError ? "error" : context.isPartial ? pendingColor : "success";
+	const railColor: ThemeColor = isError ? "error" : context.isPartial ? pendingColor : toolAccent(name);
 
 	// Count meaningful content lines (excluding trailing Pi truncation footers).
 	const contentLines = rawLines.filter((l, idx) => {
@@ -805,7 +834,7 @@ function buildToolLines(
 			if (phase === "curating" || phase === "waiting-for-approval" || phase === "curator-fallback") {
 				metrics.push({ text: "等待确认", color: "warning" });
 			} else if (phase === "generating-summary") {
-				metrics.push({ text: "生成摘要", color: "warning" });
+				metrics.push({ text: "生成摘要", color: "accent" });
 			} else if (name === "fetch_content") {
 				metrics.push({ text: `抓取中${pct}`, color: "warning" });
 			} else if (name === "web_search") {
@@ -816,19 +845,19 @@ function buildToolLines(
 		} else {
 			metrics.push({ text: "运行中", color: "warning" });
 			if (shell && contentLines.length > 0 && !(contentLines.length === 1 && contentLines[0] === "(no output)")) {
-				metrics.push({ text: `${contentLines.length} 行`, color: "dim" });
+				metrics.push({ text: `${contentLines.length} 行`, color: "syntaxVariable" });
 			}
 		}
 	} else if (name === "read") {
 		if (image) {
-			metrics.push({ text: `图片 ${oneLine(image.mimeType)}`, color: "muted" });
+			metrics.push({ text: `图片 ${oneLine(image.mimeType)}`, color: "syntaxVariable" });
 		} else if (details?.truncation?.firstLineExceedsLimit) {
 			metrics.push({ text: "首行超限", color: "warning" });
 		} else if (details?.truncation?.truncated && details.truncation.outputLines && details.truncation.totalLines) {
-			metrics.push({ text: `${details.truncation.outputLines}/${details.truncation.totalLines} 行`, color: "dim" });
+			metrics.push({ text: `${details.truncation.outputLines}/${details.truncation.totalLines} 行`, color: "muted" });
 		} else if (contentLines.length > 0) {
 			const count = rawText.trimEnd() ? rawText.replace(/\r\n?/g, "\n").replace(/\n$/, "").split("\n").length : 0;
-			metrics.push({ text: `${count} 行`, color: "dim" });
+			metrics.push({ text: `${count} 行`, color: "muted" });
 		} else {
 			metrics.push({ text: "空文件", color: "dim" });
 		}
@@ -842,16 +871,16 @@ function buildToolLines(
 			if (counts.removed > 0) metrics.push({ text: `−${counts.removed}`, color: "toolDiffRemoved" });
 			if (counts.added === 0 && counts.removed === 0) metrics.push({ text: "无变更", color: "dim" });
 		} else {
-			metrics.push({ text: "已修改", color: "dim" });
+			metrics.push({ text: "已修改", color: "muted" });
 		}
 	} else if (name === "write") {
 		if (typeof args?.content === "string") {
 			const writeLines = args.content.length === 0 ? 0 : args.content.replace(/\r\n?/g, "\n").replace(/\n$/, "").split("\n").length;
 			const bytes = Buffer.byteLength(args.content, "utf8");
-			metrics.push({ text: `${writeLines} 行`, color: "dim" });
-			if (bytes >= 1024) metrics.push({ text: formatBytes(bytes), color: "dim" });
+			metrics.push({ text: `${writeLines} 行`, color: "muted" });
+			if (bytes >= 1024) metrics.push({ text: formatBytes(bytes), color: "syntaxVariable" });
 		} else {
-			metrics.push({ text: "已写入", color: "dim" });
+			metrics.push({ text: "已写入", color: "muted" });
 		}
 	} else if (searchTools.has(name)) {
 		const find = name === "find" || name === "fffind";
@@ -863,7 +892,7 @@ function buildToolLines(
 			: typeof total === "number" && Number.isSafeInteger(total) && total > 0
 				? `${total} ${find ? "个文件" : "处匹配"}`
 				: (find ? "有结果" : "有匹配");
-		metrics.push({ text: summary, color: "dim" });
+		metrics.push({ text: summary, color: empty ? "dim" : "muted" });
 		if (fffSearch) {
 			const notice = lines.at(-1) ?? "";
 			if (lines[0] === "[0 exact matches. Maybe you meant this?]") metrics.push({ text: "近似匹配", color: "warning" });
@@ -872,67 +901,67 @@ function buildToolLines(
 				metrics.push({ text: "弱匹配", color: "warning" });
 			}
 			if (notice.startsWith("[") && /Continue with cursor="[^"]+"|cursor="[^"]+" to continue/.test(notice)) {
-				metrics.push({ text: "可翻页", color: "dim" });
+				metrics.push({ text: "可翻页", color: "accent" });
 			}
 		}
 		if (truncated && !fullOutputPath) metrics.push({ text: "截断", color: "warning" });
 	} else if (name === "tool_search") {
 		const loaded = Array.isArray(details?.loaded) ? details.loaded.length : undefined;
 		if (typeof loaded === "number") {
-			metrics.push({ text: loaded === 0 ? "无匹配" : `加载 ${loaded} 个工具`, color: "dim" });
+			metrics.push({ text: loaded === 0 ? "无匹配" : `加载 ${loaded} 个工具`, color: loaded === 0 ? "dim" : "syntaxVariable" });
 		} else {
 			const empty = contentLines.length === 0 || /^No matching tools/i.test(contentLines[0]!);
-			metrics.push({ text: empty ? "无匹配" : "已加载", color: "dim" });
+			metrics.push({ text: empty ? "无匹配" : "已加载", color: empty ? "dim" : "muted" });
 		}
 	} else if (name === "web_search") {
 		if (typeof details?.queryCount === "number" && details.queryCount > 1) {
 			metrics.push({ text: `${details.successfulQueries ?? details.queryCount}/${details.queryCount} 组`, color: "dim" });
 		}
 		if (typeof details?.totalResults === "number") {
-			metrics.push({ text: details.totalResults > 0 ? `${details.totalResults} 来源` : "无结果", color: "dim" });
+			metrics.push({ text: details.totalResults > 0 ? `${details.totalResults} 来源` : "无结果", color: details.totalResults > 0 ? "syntaxVariable" : "dim" });
 		} else {
-			metrics.push({ text: contentLines.length > 0 ? "已完成" : "无结果", color: "dim" });
+			metrics.push({ text: contentLines.length > 0 ? "已完成" : "无结果", color: contentLines.length > 0 ? "muted" : "dim" });
 		}
-		if (details?.summary?.text) metrics.push({ text: "已摘要", color: "muted" });
-		if (details?.curated) metrics.push({ text: "已精选", color: "muted" });
+		if (details?.summary?.text) metrics.push({ text: "已摘要", color: "accent" });
+		if (details?.curated) metrics.push({ text: "已精选", color: "accent" });
 		if (details?.fetchId && details.fetchUrls?.length) {
-			metrics.push({ text: `抓取 ${details.fetchUrls.length} 页`, color: "dim" });
+			metrics.push({ text: `抓取 ${details.fetchUrls.length} 页`, color: "muted" });
 		}
 	} else if (name === "fetch_content") {
 		if (details?.urlCount === 1) {
 			if (typeof details.totalChars === "number") {
-				metrics.push({ text: formatCharCount(details.totalChars), color: "dim" });
+				metrics.push({ text: formatCharCount(details.totalChars), color: "muted" });
 			}
 			const imgCount = details.imageCount ?? (details.hasImage ? 1 : 0);
-			if (imgCount > 0) metrics.push({ text: `${imgCount} 图`, color: "muted" });
+			if (imgCount > 0) metrics.push({ text: `${imgCount} 图`, color: "syntaxVariable" });
 			if (details.truncated) metrics.push({ text: "截断", color: "warning" });
 		} else if (typeof details?.urlCount === "number") {
-			metrics.push({ text: `${details.successful ?? 0}/${details.urlCount} 页`, color: "dim" });
+			metrics.push({ text: `${details.successful ?? 0}/${details.urlCount} 页`, color: "muted" });
 		} else {
-			metrics.push({ text: contentLines.length > 0 ? "已抓取" : "无内容", color: "dim" });
+			metrics.push({ text: contentLines.length > 0 ? "已抓取" : "无内容", color: contentLines.length > 0 ? "muted" : "dim" });
 		}
 	} else if (name === "get_search_content") {
 		if (typeof details?.matchCount === "number") {
-			metrics.push({ text: details.matchCount > 0 ? `${details.matchCount} 处匹配` : "无匹配", color: "dim" });
+			metrics.push({ text: details.matchCount > 0 ? `${details.matchCount} 处匹配` : "无匹配", color: details.matchCount > 0 ? "syntaxVariable" : "dim" });
 		} else if (typeof details?.resultCount === "number") {
-			metrics.push({ text: `${details.resultCount} 条结果`, color: "dim" });
+			metrics.push({ text: `${details.resultCount} 条结果`, color: "muted" });
 		} else if (typeof details?.contentLength === "number") {
-			metrics.push({ text: formatCharCount(details.contentLength), color: "dim" });
+			metrics.push({ text: formatCharCount(details.contentLength), color: "muted" });
 		} else {
-			metrics.push({ text: contentLines.length > 0 ? "已读取" : "无内容", color: "dim" });
+			metrics.push({ text: contentLines.length > 0 ? "已读取" : "无内容", color: contentLines.length > 0 ? "muted" : "dim" });
 		}
-		if (details?.nextOffset !== undefined) metrics.push({ text: "可翻页", color: "dim" });
+		if (details?.nextOffset !== undefined) metrics.push({ text: "可翻页", color: "accent" });
 	} else if (name === "source_check") {
-		metrics.push({ text: contentLines.length > 0 ? "已核查" : "无结果", color: "dim" });
+		metrics.push({ text: contentLines.length > 0 ? "已核查" : "无结果", color: contentLines.length > 0 ? "muted" : "dim" });
 	} else if (name === "ls") {
 		const empty = contentLines.length === 0 || (contentLines.length === 1 && /^\(empty directory\)$/i.test(contentLines[0]!));
-		metrics.push({ text: empty ? "空目录" : `${contentLines.length} 项`, color: "dim" });
+		metrics.push({ text: empty ? "空目录" : `${contentLines.length} 项`, color: empty ? "dim" : "muted" });
 		if (truncated && !fullOutputPath) metrics.push({ text: "截断", color: "warning" });
 	} else if (shell) {
 		if (details?.truncation?.truncated && details.truncation.totalLines) {
-			metrics.push({ text: `${details.truncation.totalLines} 行`, color: "dim" });
+			metrics.push({ text: `${details.truncation.totalLines} 行`, color: "muted" });
 		} else if (contentLines.length > 0 && !(contentLines.length === 1 && contentLines[0] === "(no output)")) {
-			metrics.push({ text: `${contentLines.length} 行`, color: "dim" });
+			metrics.push({ text: `${contentLines.length} 行`, color: "muted" });
 		} else {
 			metrics.push({ text: "无输出", color: "dim" });
 		}
@@ -1068,8 +1097,9 @@ export default function (pi: ExtensionAPI): void {
 					stopAnimation(row);
 				}
 
+				const pendingColor: ThemeColor = context.isError ? "error" : context.executionStarted ? "warning" : "accent";
 				const metrics: MetricSegment[] = [
-					{ text: context.executionStarted ? "运行中" : "等待结果", color: context.isError ? "error" : "warning" },
+					{ text: context.executionStarted ? "运行中" : "等待结果", color: pendingColor },
 				];
 				const elapsedMs = animating ? getElapsedMs(row, context.executionStarted) : undefined;
 				const elapsed = animating ? formatLiveElapsed(elapsedMs ?? 0) : "";
@@ -1079,9 +1109,9 @@ export default function (pi: ExtensionAPI): void {
 					name,
 					args: row.args,
 					cwd: context.cwd,
-					symbol: context.isError ? "×" : animating ? activeSymbol(row, context.executionStarted) : "◐",
-					statusColor: context.isError ? "error" : "warning",
-					railColor: context.isError ? "error" : "warning",
+					symbol: context.isError ? "×" : animating ? activeSymbol(row) : "•",
+					statusColor: pendingColor,
+					railColor: pendingColor,
 					railPulse: animating && railPulse(row),
 					metrics,
 				});

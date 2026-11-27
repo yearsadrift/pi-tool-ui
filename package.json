@@ -1,6 +1,6 @@
 {
   "name": "pi-tool-ui",
-  "version": "0.3.0",
+  "version": "0.3.2",
   "private": true,
   "type": "module",
   "description": "Clean transparent compact tool renderers for Pi",
