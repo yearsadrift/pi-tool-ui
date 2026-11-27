@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { isAbsolute, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
 	formatReadLineRange,
@@ -47,6 +47,7 @@ interface RowState {
 	callSlot?: ToggleSlot;
 	expandedBox?: Box;
 	nativeCall?: Component;
+	nativeCallExpanded?: boolean;
 	nativeResult?: Component;
 	nativeTimerPending?: boolean;
 	frame?: number;
@@ -82,6 +83,8 @@ interface ResultDetails {
 	currentQuery?: string;
 	curatorUrl?: string;
 	shortcut?: string;
+	browserOpenError?: string;
+	timeoutSeconds?: number;
 	queryCount?: number;
 	successfulQueries?: number;
 	totalResults?: number;
@@ -101,12 +104,13 @@ interface ResultDetails {
 	resultCount?: number;
 	contentLength?: number;
 	nextOffset?: number;
-	calls?: { name: string; args?: string; status: "running" | "ok" | "error" | "cancelled"; error?: string }[];
+	calls?: { name: string; args?: string; status: "running" | "ok" | "error" | "cancelled"; error?: string; cost?: number }[];
 }
 
 interface MetricSegment {
 	text: string;
 	color: ThemeColor;
+	priority?: 0 | 1 | 2;
 }
 
 class CompactLines implements Component {
@@ -250,6 +254,16 @@ function durationColor(ms: number | undefined): ThemeColor {
 function formatCharCount(chars: number): string {
 	if (chars < 1000) return `${chars} 字`;
 	return `${(chars / 1000).toFixed(1)}k 字`;
+}
+
+function formatCost(cost: number): string {
+	if (!Number.isFinite(cost) || cost <= 0) return "";
+	if (cost < 0.01) return `$${cost.toFixed(4).replace(/0+$/, "").replace(/\.$/, "")}`;
+	return `$${cost.toFixed(2)}`;
+}
+
+function isInvalidStringArg(value: unknown): boolean {
+	return value !== undefined && value !== null && typeof value !== "string";
 }
 
 function isLinkablePath(raw: string): boolean {
@@ -463,6 +477,42 @@ function renderMetrics(theme: Theme, segments: MetricSegment[]): { text: string;
 	return { text, width: visibleWidth(text) };
 }
 
+function fitMetrics(theme: Theme, segments: MetricSegment[], maxWidth: number): { text: string; width: number } {
+	if (segments.length === 0 || maxWidth <= 0) return { text: "", width: 0 };
+	const full = renderMetrics(theme, segments);
+	if (full.width <= maxWidth) return full;
+
+	const kept = [...segments];
+	for (const dropPriority of [2, 1, 0] as const) {
+		for (let i = kept.length - 1; i >= 0; i--) {
+			if ((kept[i]!.priority ?? 1) !== dropPriority) continue;
+			kept.splice(i, 1);
+			if (kept.length === 0) return { text: "", width: 0 };
+			const candidate = renderMetrics(theme, kept);
+			if (candidate.width <= maxWidth) return candidate;
+		}
+	}
+	return { text: "", width: 0 };
+}
+
+function styleSkill(skillName: string, range: string, maxWidth: number, theme: Theme, linkUrl?: string): string {
+	if (maxWidth <= 0) return "";
+	const rangeWidth = visibleWidth(range);
+	const keepRange = rangeWidth > 0 && maxWidth > rangeWidth + 4;
+	const budget = keepRange ? maxWidth - rangeWidth : maxWidth;
+	const badge = "[skill] ";
+	const badgeWidth = visibleWidth(badge);
+	let styled: string;
+	if (budget > badgeWidth + 2) {
+		const fittedName = truncateToWidth(skillName, budget - badgeWidth, "…");
+		styled = theme.fg("accent", "[skill]") + " " + theme.fg("text", fittedName);
+	} else {
+		styled = theme.fg("text", truncateToWidth(skillName, budget, "…"));
+	}
+	const linked = linkUrl ? hyperlink(styled, linkUrl) : styled;
+	return keepRange ? linked + theme.fg("accent", range) : linked;
+}
+
 function styleUrl(displayUrl: string, maxWidth: number, theme: Theme, linkUrl?: string): string {
 	if (maxWidth <= 0) return "";
 	const fitted = truncatePath(displayUrl, maxWidth);
@@ -504,13 +554,20 @@ function renderSubject(
 	maxWidth: number,
 	theme: Theme,
 	codemodeLabel?: string,
+	preferRawCommand = false,
 ): string {
 	if (maxWidth <= 0) return "";
 
 	if (name === "bash" || name === "powershell") {
+		const rawCmd = oneLine(args?.command);
+		const invalidCmd = isInvalidStringArg(args?.command);
 		const summary = oneLine(args?.displaySummary);
-		const primary = summary || oneLine(args?.command) || "…";
-		const color: ThemeColor = summary ? "text" : "toolOutput";
+		const useSummary = Boolean(summary) && (!preferRawCommand || !rawCmd);
+		if (!useSummary && invalidCmd) {
+			return theme.fg("error", truncateToWidth("[无效参数]", maxWidth, "…"));
+		}
+		const primary = (useSummary ? summary : rawCmd) || summary || "…";
+		const color: ThemeColor = useSummary ? "text" : "toolOutput";
 		const timeout = typeof args?.timeout === "number" ? ` · ${args.timeout}s` : "";
 		const keepTimeout = timeout && maxWidth > visibleWidth(timeout) + 6;
 		const cmdBudget = keepTimeout ? maxWidth - visibleWidth(timeout) : maxWidth;
@@ -524,6 +581,9 @@ function renderSubject(
 	}
 
 	if (name === "tool_search") {
+		if (isInvalidStringArg(args?.query)) {
+			return theme.fg("error", truncateToWidth("[无效参数]", maxWidth, "…"));
+		}
 		const query = oneLine(args?.query);
 		return query ? theme.fg("syntaxString", truncateToWidth(`"${query}"`, maxWidth, "…")) : theme.fg("dim", "…");
 	}
@@ -549,44 +609,93 @@ function renderSubject(
 	}
 
 	if (name === "get_search_content") {
+		const offsetVal = typeof args?.offset === "number" && Number.isFinite(args.offset) && args.offset > 0
+			? ` @${Math.floor(args.offset)}`
+			: "";
+		const offsetWidth = visibleWidth(offsetVal);
+		const keepOffset = offsetWidth > 0 && maxWidth > offsetWidth + 6;
+		const budget = keepOffset ? maxWidth - offsetWidth : maxWidth;
+		let main: string;
 		const findTerms = extractStringList(args?.findText, Array.isArray(args?.findText) ? args.findText : undefined);
-		if (findTerms.length > 0) return renderQuotedList(findTerms, maxWidth, theme);
-		const query = oneLine(args?.query);
-		if (query) return theme.fg("syntaxString", truncateToWidth(`"${query}"`, maxWidth, "…"));
-		const url = oneLine(args?.url);
-		if (url) {
-			return styleUrl(shortenUrl(url), maxWidth, theme, buildWebLink(url));
+		if (findTerms.length > 0) {
+			main = renderQuotedList(findTerms, budget, theme);
+		} else {
+			const query = oneLine(args?.query);
+			if (query) {
+				main = theme.fg("syntaxString", truncateToWidth(`"${query}"`, budget, "…"));
+			} else {
+				const url = oneLine(args?.url);
+				if (url) {
+					main = styleUrl(shortenUrl(url), budget, theme, buildWebLink(url));
+				} else {
+					const responseId = oneLine(args?.responseId);
+					main = theme.fg("dim", truncateToWidth(responseId ? responseId.slice(0, 8) : "…", budget, "…"));
+				}
+			}
 		}
-		const responseId = oneLine(args?.responseId);
-		return theme.fg("dim", truncateToWidth(responseId ? responseId.slice(0, 8) : "…", maxWidth, "…"));
+		return keepOffset ? main + theme.fg("accent", offsetVal) : main;
 	}
 
-	const rawPath = oneLine(args?.file_path ?? args?.path);
+	const rawPathArg = args?.file_path ?? args?.path;
+	const invalidPath = isInvalidStringArg(rawPathArg);
+	const rawPath = oneLine(rawPathArg);
 	const displayPath = shortenPath(rawPath, cwd);
 	const fileLink = buildFileLink(rawPath, cwd);
 
 	if (name === "read") {
+		if (invalidPath) return theme.fg("error", truncateToWidth("[无效参数]", maxWidth, "…"));
 		const range = formatReadLineRange(args?.offset, args?.limit);
+		if (rawPath) {
+			const resolvedPath = resolve(cwd, rawPath);
+			if (basename(resolvedPath) === "SKILL.md") {
+				const skillDir = basename(dirname(resolvedPath)) || "SKILL.md";
+				return styleSkill(skillDir, range, maxWidth, theme, fileLink);
+			}
+		}
 		return stylePath(displayPath || "…", range, maxWidth, theme, fileLink);
 	}
 
 	if (searchTools.has(name)) {
+		if (isInvalidStringArg(args?.pattern)) {
+			return theme.fg("error", truncateToWidth("[无效参数]", maxWidth, "…"));
+		}
 		const pattern = oneLine(args?.pattern);
-		if (!pattern) return stylePath(displayPath || ".", "", maxWidth, theme, fileLink);
+		const glob = name === "grep" ? oneLine(args?.glob) : "";
+		if (!pattern) {
+			if (invalidPath) return theme.fg("error", truncateToWidth("[无效参数]", maxWidth, "…"));
+			return stylePath(displayPath || ".", "", maxWidth, theme, fileLink);
+		}
 		const quoted = `"${pattern}"`;
-		if (!displayPath || displayPath === ".") {
+		const scopePath = displayPath && displayPath !== "." ? displayPath : "";
+		const globSuffix = glob ? `(${glob})` : "";
+		if (!scopePath && !globSuffix) {
 			return theme.fg("syntaxString", truncateToWidth(quoted, maxWidth, "…"));
 		}
 		const patternWidth = visibleWidth(quoted);
 		if (patternWidth + 4 >= maxWidth) {
 			return theme.fg("syntaxString", truncateToWidth(quoted, maxWidth, "…"));
 		}
-		const pathBudget = maxWidth - patternWidth - 2;
-		const fittedPath = truncatePath(displayPath, pathBudget);
-		const styledPath = theme.fg("dim", fittedPath);
-		return `${theme.fg("syntaxString", quoted)}  ${fileLink ? hyperlink(styledPath, fileLink) : styledPath}`;
+		const scopeBudget = maxWidth - patternWidth - 2;
+		if (scopePath && globSuffix) {
+			const globWidth = visibleWidth(globSuffix);
+			if (scopeBudget > globWidth + 5) {
+				const fittedPath = truncatePath(scopePath, scopeBudget - globWidth - 1);
+				const styledPath = theme.fg("dim", fittedPath);
+				return `${theme.fg("syntaxString", quoted)}  ${fileLink ? hyperlink(styledPath, fileLink) : styledPath} ${theme.fg("dim", globSuffix)}`;
+			}
+			const fittedPath = truncatePath(scopePath, scopeBudget);
+			const styledPath = theme.fg("dim", fittedPath);
+			return `${theme.fg("syntaxString", quoted)}  ${fileLink ? hyperlink(styledPath, fileLink) : styledPath}`;
+		}
+		if (scopePath) {
+			const fittedPath = truncatePath(scopePath, scopeBudget);
+			const styledPath = theme.fg("dim", fittedPath);
+			return `${theme.fg("syntaxString", quoted)}  ${fileLink ? hyperlink(styledPath, fileLink) : styledPath}`;
+		}
+		return `${theme.fg("syntaxString", quoted)}  ${theme.fg("dim", truncateToWidth(globSuffix, scopeBudget, "…"))}`;
 	}
 
+	if (invalidPath) return theme.fg("error", truncateToWidth("[无效参数]", maxWidth, "…"));
 	return stylePath(displayPath || (name === "ls" ? "." : "…"), "", maxWidth, theme, fileLink);
 }
 
@@ -602,9 +711,10 @@ function headerLine(
 		railPulse?: boolean;
 		metrics: MetricSegment[];
 		codemodeLabel?: string;
+		preferRawCommand?: boolean;
 	},
 ): Line {
-	const { name, args, cwd, symbol, statusColor, railColor, railPulse: pulse = false, metrics, codemodeLabel } = options;
+	const { name, args, cwd, symbol, statusColor, railColor, railPulse: pulse = false, metrics, codemodeLabel, preferRawCommand = false } = options;
 	return (width) => {
 		const paddedName = width >= minAlignedRowWidth && name.length < toolNamePadWidth
 			? name.padEnd(toolNamePadWidth)
@@ -619,14 +729,15 @@ function headerLine(
 		const available = width - prefixWidth - gap.length;
 		if (available <= 0) return prefix;
 
-		const renderedMetrics = renderMetrics(theme, metrics);
-		const showMetrics = renderedMetrics.width > 0 && available >= renderedMetrics.width + 10;
+		const renderedMetrics = fitMetrics(theme, metrics, available - 10);
+		const showMetrics = renderedMetrics.width > 0;
 		const metricJoin = showMetrics ? theme.fg("dim", "  · ") + renderedMetrics.text : "";
 		const subjectBudget = showMetrics ? available - renderedMetrics.width - 4 : available;
-		const subject = renderSubject(name, args, cwd, subjectBudget, theme, codemodeLabel);
+		const subject = renderSubject(name, args, cwd, subjectBudget, theme, codemodeLabel, preferRawCommand);
 		if (!subject) {
-			return renderedMetrics.width > 0
-				? `${prefix}${gap}${truncateToWidth(renderedMetrics.text, available, "…")}`
+			const fallbackMetrics = fitMetrics(theme, metrics, available);
+			return fallbackMetrics.width > 0
+				? `${prefix}${gap}${fallbackMetrics.text}`
 				: prefix;
 		}
 		return `${prefix}${gap}${subject}${metricJoin}`;
@@ -698,26 +809,43 @@ function buildCodemodeLines(
 
 	const breakdown = summarizeCallNames(calls);
 	const codemodeLabel = breakdown || undefined;
+	const imageCount = result.content.filter((block) => block.type === "image").length;
+	const totalCost = calls.reduce(
+		(sum, call) => sum + (typeof call.cost === "number" && Number.isFinite(call.cost) && call.cost > 0 ? call.cost : 0),
+		0,
+	);
 
 	const metrics: MetricSegment[] = [];
 	if (calls.length > 0) {
-		metrics.push({ text: `${calls.length} 次`, color: "muted" });
+		metrics.push({ text: `${calls.length} 次`, color: "muted", priority: 1 });
 	}
 	if (issue) {
-		metrics.push({ text: "脚本失败", color: "error" });
-	} else if (hasNestedError) {
-		metrics.push({ text: `${errors.length} 失败`, color: "error" });
-	} else if (context.isPartial) {
-		const active = oneLine(running.at(-1)?.name);
-		metrics.push({ text: active ? `正在执行 ${active}` : "运行中", color: "warning" });
-	} else if (cancelled > 0) {
-		metrics.push({ text: `${cancelled} 取消`, color: "warning" });
-	} else if (calls.length === 0) {
-		metrics.push({ text: "完成", color: "dim" });
+		metrics.push({ text: "脚本失败", color: "error", priority: 0 });
+	} else {
+		if (hasNestedError) {
+			metrics.push({ text: `${errors.length} 失败`, color: "error", priority: 0 });
+		}
+		if (context.isPartial) {
+			const active = oneLine(running.at(-1)?.name);
+			metrics.push({ text: active ? `正在执行 ${active}` : "运行中", color: "warning", priority: 1 });
+		}
+		if (cancelled > 0) {
+			metrics.push({ text: `${cancelled} 取消`, color: "warning", priority: 0 });
+		}
+		if (!hasNestedError && !context.isPartial && cancelled === 0 && calls.length === 0) {
+			metrics.push({ text: "完成", color: "dim", priority: 1 });
+		}
+	}
+	if (!issue && imageCount > 0) {
+		metrics.push({ text: `${imageCount} 图`, color: "syntaxVariable", priority: 1 });
+	}
+	const costText = formatCost(totalCost);
+	if (costText) {
+		metrics.push({ text: costText, color: "syntaxVariable", priority: 2 });
 	}
 	const elapsedMs = animating ? getElapsedMs(row, context.executionStarted) : context.durationMs;
 	const duration = animating ? formatLiveElapsed(elapsedMs ?? 0) : formatDuration(context.durationMs);
-	if (duration) metrics.push({ text: duration, color: durationColor(elapsedMs) });
+	if (duration) metrics.push({ text: duration, color: durationColor(elapsedMs), priority: 2 });
 
 	const lines: Line[] = [
 		headerLine(theme, {
@@ -734,8 +862,9 @@ function buildCodemodeLines(
 	];
 
 	if (issue) {
-		const error = (scriptError?.replace(/^Script error:\s*/, "") ?? blocks.at(-1))?.split(/\r?\n/, 1)[0];
-		const message = oneLine(error) || nestedError || "脚本执行失败";
+		const rawError = scriptError?.replace(/^Script error:\s*/, "") ?? blocks.at(-1);
+		const firstLine = rawError?.split(/\r?\n/).map(oneLine).find(Boolean);
+		const message = firstLine || nestedError || "脚本执行失败";
 		lines.push(
 			details?.fullOutputPath
 				? fullOutputDetail(theme, railColor, message, "error", details.fullOutputPath, context.cwd)
@@ -804,10 +933,22 @@ function buildToolLines(
 	);
 	const image = result.content.find((block) => block.type === "image");
 
-	const symbol = isError ? "×" : animating ? activeSymbol(row) : "✓";
+	const fetchMulti = name === "fetch_content" && !context.isPartial && !isError && typeof details?.urlCount === "number" && details.urlCount > 1;
+	const fetchSuccessful = fetchMulti && typeof details.successful === "number" ? details.successful : undefined;
+	const fetchAllFailed = fetchMulti && (fetchSuccessful ?? 0) === 0;
+	const fetchPartialFailed = fetchMulti && (fetchSuccessful ?? 0) > 0 && (fetchSuccessful ?? 0) < details.urlCount!;
+
+	const searchMulti = name === "web_search" && !context.isPartial && !isError && typeof details?.queryCount === "number" && details.queryCount > 0 && typeof details.successfulQueries === "number";
+	const searchAllFailed = searchMulti && details.successfulQueries === 0;
+	const searchPartialFailed = searchMulti && details.successfulQueries! > 0 && details.successfulQueries! < details.queryCount!;
+
+	const allFailed = fetchAllFailed || searchAllFailed;
+	const partialFailed = fetchPartialFailed || searchPartialFailed;
+
+	const symbol = isError || allFailed ? "×" : animating ? activeSymbol(row) : partialFailed ? "!" : "✓";
 	const pendingColor: ThemeColor = context.executionStarted ? "warning" : "accent";
-	const statusColor: ThemeColor = isError ? "error" : context.isPartial ? pendingColor : "success";
-	const railColor: ThemeColor = isError ? "error" : context.isPartial ? pendingColor : toolAccent(name);
+	const statusColor: ThemeColor = isError || allFailed ? "error" : context.isPartial ? pendingColor : partialFailed ? "warning" : "success";
+	const railColor: ThemeColor = isError || allFailed ? "error" : context.isPartial ? pendingColor : partialFailed ? "warning" : toolAccent(name);
 
 	// Count meaningful content lines (excluding trailing Pi truncation footers).
 	const contentLines = rawLines.filter((l, idx) => {
@@ -824,7 +965,7 @@ function buildToolLines(
 	const duration = animating ? formatLiveElapsed(elapsedMs ?? 0) : formatDuration(context.durationMs);
 
 	if (isError) {
-		if (exitCode) metrics.push({ text: `exit ${exitCode}`, color: "error" });
+		if (exitCode) metrics.push({ text: `exit ${exitCode}`, color: "error", priority: 0 });
 	} else if (context.isPartial) {
 		if (webAccess) {
 			const phase = details?.phase;
@@ -832,55 +973,58 @@ function buildToolLines(
 				? ` ${Math.round(details.progress * 100)}%`
 				: "";
 			if (phase === "curating" || phase === "waiting-for-approval" || phase === "curator-fallback") {
-				metrics.push({ text: "等待确认", color: "warning" });
+				metrics.push({ text: "等待确认", color: "warning", priority: 0 });
 			} else if (phase === "generating-summary") {
-				metrics.push({ text: "生成摘要", color: "accent" });
+				metrics.push({ text: "生成摘要", color: "accent", priority: 1 });
 			} else if (name === "fetch_content") {
-				metrics.push({ text: `抓取中${pct}`, color: "warning" });
+				metrics.push({ text: `抓取中${pct}`, color: "warning", priority: 1 });
 			} else if (name === "web_search") {
-				metrics.push({ text: `搜索中${pct}`, color: "warning" });
+				metrics.push({ text: `搜索中${pct}`, color: "warning", priority: 1 });
 			} else {
-				metrics.push({ text: "运行中", color: "warning" });
+				metrics.push({ text: "运行中", color: "warning", priority: 1 });
 			}
 		} else {
-			metrics.push({ text: "运行中", color: "warning" });
+			metrics.push({ text: "运行中", color: "warning", priority: 1 });
 			if (shell && contentLines.length > 0 && !(contentLines.length === 1 && contentLines[0] === "(no output)")) {
-				metrics.push({ text: `${contentLines.length} 行`, color: "syntaxVariable" });
+				metrics.push({ text: `${contentLines.length} 行`, color: "syntaxVariable", priority: 1 });
 			}
 		}
 	} else if (name === "read") {
 		if (image) {
-			metrics.push({ text: `图片 ${oneLine(image.mimeType)}`, color: "syntaxVariable" });
+			metrics.push({ text: `图片 ${oneLine(image.mimeType)}`, color: "syntaxVariable", priority: 1 });
 		} else if (details?.truncation?.firstLineExceedsLimit) {
-			metrics.push({ text: "首行超限", color: "warning" });
+			metrics.push({ text: "首行超限", color: "warning", priority: 0 });
 		} else if (details?.truncation?.truncated && details.truncation.outputLines && details.truncation.totalLines) {
-			metrics.push({ text: `${details.truncation.outputLines}/${details.truncation.totalLines} 行`, color: "muted" });
+			metrics.push({ text: `${details.truncation.outputLines}/${details.truncation.totalLines} 行`, color: "muted", priority: 1 });
 		} else if (contentLines.length > 0) {
 			const count = rawText.trimEnd() ? rawText.replace(/\r\n?/g, "\n").replace(/\n$/, "").split("\n").length : 0;
-			metrics.push({ text: `${count} 行`, color: "muted" });
+			metrics.push({ text: `${count} 行`, color: "muted", priority: 1 });
 		} else {
-			metrics.push({ text: "空文件", color: "dim" });
+			metrics.push({ text: "空文件", color: "dim", priority: 1 });
 		}
 		if (truncated && !fullOutputPath && !details?.truncation?.firstLineExceedsLimit) {
-			metrics.push({ text: "截断", color: "warning" });
+			metrics.push({ text: "截断", color: "warning", priority: 0 });
 		}
 	} else if (name === "edit") {
 		const counts = countDiffLines(details?.diff);
 		if (counts) {
-			if (counts.added > 0) metrics.push({ text: `+${counts.added}`, color: "toolDiffAdded" });
-			if (counts.removed > 0) metrics.push({ text: `−${counts.removed}`, color: "toolDiffRemoved" });
-			if (counts.added === 0 && counts.removed === 0) metrics.push({ text: "无变更", color: "dim" });
+			if (counts.added > 0) metrics.push({ text: `+${counts.added}`, color: "toolDiffAdded", priority: 0 });
+			if (counts.removed > 0) metrics.push({ text: `−${counts.removed}`, color: "toolDiffRemoved", priority: 0 });
+			if (counts.added === 0 && counts.removed === 0) metrics.push({ text: "无变更", color: "dim", priority: 1 });
 		} else {
-			metrics.push({ text: "已修改", color: "muted" });
+			metrics.push({ text: "已修改", color: "muted", priority: 1 });
+		}
+		if (Array.isArray(args?.edits) && args.edits.length > 1) {
+			metrics.push({ text: `${args.edits.length} 处`, color: "dim", priority: 2 });
 		}
 	} else if (name === "write") {
 		if (typeof args?.content === "string") {
 			const writeLines = args.content.length === 0 ? 0 : args.content.replace(/\r\n?/g, "\n").replace(/\n$/, "").split("\n").length;
 			const bytes = Buffer.byteLength(args.content, "utf8");
-			metrics.push({ text: `${writeLines} 行`, color: "muted" });
-			if (bytes >= 1024) metrics.push({ text: formatBytes(bytes), color: "syntaxVariable" });
+			metrics.push({ text: `${writeLines} 行`, color: "muted", priority: 1 });
+			if (bytes >= 1024) metrics.push({ text: formatBytes(bytes), color: "syntaxVariable", priority: 2 });
 		} else {
-			metrics.push({ text: "已写入", color: "muted" });
+			metrics.push({ text: "已写入", color: "muted", priority: 1 });
 		}
 	} else if (searchTools.has(name)) {
 		const find = name === "find" || name === "fffind";
@@ -892,85 +1036,100 @@ function buildToolLines(
 			: typeof total === "number" && Number.isSafeInteger(total) && total > 0
 				? `${total} ${find ? "个文件" : "处匹配"}`
 				: (find ? "有结果" : "有匹配");
-		metrics.push({ text: summary, color: empty ? "dim" : "muted" });
+		metrics.push({ text: summary, color: empty ? "dim" : "muted", priority: 1 });
 		if (fffSearch) {
+			if (oneLine(args?.cursor)) metrics.push({ text: "续页", color: "accent", priority: 2 });
 			const notice = lines.at(-1) ?? "";
-			if (lines[0] === "[0 exact matches. Maybe you meant this?]") metrics.push({ text: "近似匹配", color: "warning" });
-			if (notice.startsWith("[Invalid regex:")) metrics.push({ text: "正则回退", color: "warning" });
+			if (lines[0] === "[0 exact matches. Maybe you meant this?]") metrics.push({ text: "近似匹配", color: "warning", priority: 0 });
+			if (notice.startsWith("[Invalid regex:")) metrics.push({ text: "正则回退", color: "warning", priority: 0 });
 			if (notice.startsWith("[Query ") && notice.includes("produced only weak scattered fuzzy matches.")) {
-				metrics.push({ text: "弱匹配", color: "warning" });
+				metrics.push({ text: "弱匹配", color: "warning", priority: 0 });
 			}
 			if (notice.startsWith("[") && /Continue with cursor="[^"]+"|cursor="[^"]+" to continue/.test(notice)) {
-				metrics.push({ text: "可翻页", color: "accent" });
+				metrics.push({ text: "可翻页", color: "accent", priority: 2 });
 			}
 		}
-		if (truncated && !fullOutputPath) metrics.push({ text: "截断", color: "warning" });
+		const limitReached = details?.matchLimitReached ?? details?.resultLimitReached;
+		if (typeof limitReached === "number" && limitReached > 0 && !fullOutputPath) {
+			metrics.push({ text: `上限 ${limitReached}`, color: "warning", priority: 0 });
+		} else if (truncated && !fullOutputPath) {
+			metrics.push({ text: "截断", color: "warning", priority: 0 });
+		}
 	} else if (name === "tool_search") {
 		const loaded = Array.isArray(details?.loaded) ? details.loaded.length : undefined;
 		if (typeof loaded === "number") {
-			metrics.push({ text: loaded === 0 ? "无匹配" : `加载 ${loaded} 个工具`, color: loaded === 0 ? "dim" : "syntaxVariable" });
+			metrics.push({ text: loaded === 0 ? "无匹配" : `加载 ${loaded} 个工具`, color: loaded === 0 ? "dim" : "syntaxVariable", priority: 1 });
 		} else {
 			const empty = contentLines.length === 0 || /^No matching tools/i.test(contentLines[0]!);
-			metrics.push({ text: empty ? "无匹配" : "已加载", color: empty ? "dim" : "muted" });
+			metrics.push({ text: empty ? "无匹配" : "已加载", color: empty ? "dim" : "muted", priority: 1 });
 		}
 	} else if (name === "web_search") {
-		if (typeof details?.queryCount === "number" && details.queryCount > 1) {
-			metrics.push({ text: `${details.successfulQueries ?? details.queryCount}/${details.queryCount} 组`, color: "dim" });
+		if (typeof details?.queryCount === "number" && (details.queryCount > 1 || searchAllFailed)) {
+			const okQueries = details.successfulQueries ?? details.queryCount;
+			const queryColor: ThemeColor = searchAllFailed ? "error" : searchPartialFailed ? "warning" : "dim";
+			const queryPriority: 0 | 2 = searchAllFailed || searchPartialFailed ? 0 : 2;
+			metrics.push({ text: `${okQueries}/${details.queryCount} 组`, color: queryColor, priority: queryPriority });
 		}
 		if (typeof details?.totalResults === "number") {
-			metrics.push({ text: details.totalResults > 0 ? `${details.totalResults} 来源` : "无结果", color: details.totalResults > 0 ? "syntaxVariable" : "dim" });
+			metrics.push({ text: details.totalResults > 0 ? `${details.totalResults} 来源` : "无结果", color: details.totalResults > 0 ? "syntaxVariable" : "dim", priority: 1 });
 		} else {
-			metrics.push({ text: contentLines.length > 0 ? "已完成" : "无结果", color: contentLines.length > 0 ? "muted" : "dim" });
+			metrics.push({ text: contentLines.length > 0 ? "已完成" : "无结果", color: contentLines.length > 0 ? "muted" : "dim", priority: 1 });
 		}
-		if (details?.summary?.text) metrics.push({ text: "已摘要", color: "accent" });
-		if (details?.curated) metrics.push({ text: "已精选", color: "accent" });
+		if (details?.summary?.text) metrics.push({ text: "已摘要", color: "accent", priority: 2 });
+		if (details?.curated) metrics.push({ text: "已精选", color: "accent", priority: 2 });
 		if (details?.fetchId && details.fetchUrls?.length) {
-			metrics.push({ text: `抓取 ${details.fetchUrls.length} 页`, color: "muted" });
+			metrics.push({ text: `抓取 ${details.fetchUrls.length} 页`, color: "muted", priority: 2 });
 		}
 	} else if (name === "fetch_content") {
 		if (details?.urlCount === 1) {
 			if (typeof details.totalChars === "number") {
-				metrics.push({ text: formatCharCount(details.totalChars), color: "muted" });
+				metrics.push({ text: formatCharCount(details.totalChars), color: "muted", priority: 1 });
 			}
 			const imgCount = details.imageCount ?? (details.hasImage ? 1 : 0);
-			if (imgCount > 0) metrics.push({ text: `${imgCount} 图`, color: "syntaxVariable" });
-			if (details.truncated) metrics.push({ text: "截断", color: "warning" });
+			if (imgCount > 0) metrics.push({ text: `${imgCount} 图`, color: "syntaxVariable", priority: 1 });
+			if (details.truncated) metrics.push({ text: "截断", color: "warning", priority: 0 });
 		} else if (typeof details?.urlCount === "number") {
-			metrics.push({ text: `${details.successful ?? 0}/${details.urlCount} 页`, color: "muted" });
+			const pageColor: ThemeColor = fetchAllFailed ? "error" : fetchPartialFailed ? "warning" : "muted";
+			const pagePriority: 0 | 1 = fetchAllFailed || fetchPartialFailed ? 0 : 1;
+			metrics.push({ text: `${details.successful ?? 0}/${details.urlCount} 页`, color: pageColor, priority: pagePriority });
 		} else {
-			metrics.push({ text: contentLines.length > 0 ? "已抓取" : "无内容", color: contentLines.length > 0 ? "muted" : "dim" });
+			metrics.push({ text: contentLines.length > 0 ? "已抓取" : "无内容", color: contentLines.length > 0 ? "muted" : "dim", priority: 1 });
 		}
 	} else if (name === "get_search_content") {
 		if (typeof details?.matchCount === "number") {
-			metrics.push({ text: details.matchCount > 0 ? `${details.matchCount} 处匹配` : "无匹配", color: details.matchCount > 0 ? "syntaxVariable" : "dim" });
+			metrics.push({ text: details.matchCount > 0 ? `${details.matchCount} 处匹配` : "无匹配", color: details.matchCount > 0 ? "syntaxVariable" : "dim", priority: 1 });
 		} else if (typeof details?.resultCount === "number") {
-			metrics.push({ text: `${details.resultCount} 条结果`, color: "muted" });
+			metrics.push({ text: `${details.resultCount} 条结果`, color: "muted", priority: 1 });
 		} else if (typeof details?.contentLength === "number") {
-			metrics.push({ text: formatCharCount(details.contentLength), color: "muted" });
+			metrics.push({ text: formatCharCount(details.contentLength), color: "muted", priority: 1 });
 		} else {
-			metrics.push({ text: contentLines.length > 0 ? "已读取" : "无内容", color: contentLines.length > 0 ? "muted" : "dim" });
+			metrics.push({ text: contentLines.length > 0 ? "已读取" : "无内容", color: contentLines.length > 0 ? "muted" : "dim", priority: 1 });
 		}
-		if (details?.nextOffset !== undefined) metrics.push({ text: "可翻页", color: "accent" });
+		if (details?.nextOffset !== undefined) metrics.push({ text: "可翻页", color: "accent", priority: 2 });
 	} else if (name === "source_check") {
-		metrics.push({ text: contentLines.length > 0 ? "已核查" : "无结果", color: contentLines.length > 0 ? "muted" : "dim" });
+		metrics.push({ text: contentLines.length > 0 ? "已核查" : "无结果", color: contentLines.length > 0 ? "muted" : "dim", priority: 1 });
 	} else if (name === "ls") {
 		const empty = contentLines.length === 0 || (contentLines.length === 1 && /^\(empty directory\)$/i.test(contentLines[0]!));
-		metrics.push({ text: empty ? "空目录" : `${contentLines.length} 项`, color: empty ? "dim" : "muted" });
-		if (truncated && !fullOutputPath) metrics.push({ text: "截断", color: "warning" });
+		metrics.push({ text: empty ? "空目录" : `${contentLines.length} 项`, color: empty ? "dim" : "muted", priority: 1 });
+		if (typeof details?.entryLimitReached === "number" && details.entryLimitReached > 0 && !fullOutputPath) {
+			metrics.push({ text: `上限 ${details.entryLimitReached}`, color: "warning", priority: 0 });
+		} else if (truncated && !fullOutputPath) {
+			metrics.push({ text: "截断", color: "warning", priority: 0 });
+		}
 	} else if (shell) {
 		if (details?.truncation?.truncated && details.truncation.totalLines) {
-			metrics.push({ text: `${details.truncation.totalLines} 行`, color: "muted" });
+			metrics.push({ text: `${details.truncation.totalLines} 行`, color: "muted", priority: 1 });
 		} else if (contentLines.length > 0 && !(contentLines.length === 1 && contentLines[0] === "(no output)")) {
-			metrics.push({ text: `${contentLines.length} 行`, color: "muted" });
+			metrics.push({ text: `${contentLines.length} 行`, color: "muted", priority: 1 });
 		} else {
-			metrics.push({ text: "无输出", color: "dim" });
+			metrics.push({ text: "无输出", color: "dim", priority: 1 });
 		}
 		if (truncated && !fullOutputPath && !fullOutputError) {
-			metrics.push({ text: "截断", color: "warning" });
+			metrics.push({ text: "截断", color: "warning", priority: 0 });
 		}
 	}
 
-	if (duration) metrics.push({ text: duration, color: durationColor(elapsedMs) });
+	if (duration) metrics.push({ text: duration, color: durationColor(elapsedMs), priority: 2 });
 
 	const out: Line[] = [
 		headerLine(theme, {
@@ -982,6 +1141,7 @@ function buildToolLines(
 			railColor,
 			railPulse: pulse,
 			metrics,
+			preferRawCommand: isError,
 		}),
 	];
 
@@ -1011,9 +1171,23 @@ function buildToolLines(
 		out.push(detailLine(theme, railColor, `图片 ${oneLine(image?.mimeType) || "image"}`, "muted", `模型不支持图片 · ${oneLine(details.imageUnsupportedByModel)}`));
 	} else if (details?.truncation?.firstLineExceedsLimit) {
 		out.push(detailLine(theme, railColor, preview || "首行超出大小限制", "warning", "截断"));
-	} else if (context.isPartial && webAccess && details?.curatorUrl) {
-		const shortcutHint = details.shortcut ? `${details.shortcut} 重开` : "浏览器中确认";
-		out.push(detailLine(theme, railColor, details.curatorUrl, "accent", shortcutHint, buildWebLink(details.curatorUrl), pulse));
+	} else if (context.isPartial && webAccess && (details?.curatorUrl || details?.phase === "curator-fallback")) {
+		const hintParts: string[] = [];
+		if (details.shortcut) hintParts.push(`${details.shortcut} 重开`);
+		if (typeof details.timeoutSeconds === "number" && details.timeoutSeconds > 0) {
+			hintParts.push(`${details.timeoutSeconds}s 后自动提交`);
+		}
+		const openErr = oneLine(details.browserOpenError);
+		if (openErr) {
+			const body = details.curatorUrl ? `${details.curatorUrl} (${openErr})` : openErr;
+			const notice = hintParts.join(" · ") || "浏览器打开失败";
+			out.push(detailLine(theme, railColor, body, "warning", notice, details.curatorUrl ? buildWebLink(details.curatorUrl) : undefined, pulse));
+		} else if (details.curatorUrl) {
+			const notice = hintParts.join(" · ") || "浏览器中确认";
+			out.push(detailLine(theme, railColor, details.curatorUrl, "accent", notice, buildWebLink(details.curatorUrl), pulse));
+		} else if (hintParts.length > 0) {
+			out.push(detailLine(theme, railColor, hintParts.join(" · "), "warning", "", undefined, pulse));
+		}
 	} else if (context.isPartial && webAccess && details?.currentQuery) {
 		out.push(detailLine(theme, railColor, `"${oneLine(details.currentQuery)}"`, "toolOutput", "", undefined, pulse));
 	} else if (context.isPartial && shell && preview) {
@@ -1035,10 +1209,12 @@ function fallbackCallComponent(name: string, args: unknown, theme: Theme): Compo
 	return new Text(`${header}\n${theme.fg("muted", lines.join("\n"))}`, 0, 0);
 }
 
-function fallbackResultComponent(result: AgentToolResult<unknown>, theme: Theme): Component {
+function fallbackResultComponent(result: AgentToolResult<unknown>, theme: Theme, isError = false): Component {
 	const output = result.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n");
 	if (!output) return new Text("", 0, 0);
-	const styled = output.split("\n").map((line) => theme.fg("toolOutput", line)).join("\n");
+	const color: ThemeColor = isError ? "error" : "toolOutput";
+	const cleaned = stripTerminalSequences(output).replace(/\r\n?/g, "\n");
+	const styled = cleaned.split("\n").map((line) => theme.fg(color, replaceControlCharacters(line.replace(/\t/g, "   ")))).join("\n");
 	return new Text(styled, 0, 0);
 }
 
@@ -1059,7 +1235,8 @@ export default function (pi: ExtensionAPI): void {
 		if (!webAccess && name !== "tool_search" && (!base.renderCall || !base.renderResult)) return base;
 
 		const renderCall = base.renderCall ?? ((args: unknown, theme: Theme) => fallbackCallComponent(name, args, theme));
-		const renderResult = base.renderResult ?? ((result: AgentToolResult<unknown>, _opts: unknown, theme: Theme) => fallbackResultComponent(result, theme));
+		const renderResult = base.renderResult ?? ((result: AgentToolResult<unknown>, _opts: unknown, theme: Theme, ctx?: RenderContext) =>
+			fallbackResultComponent(result, theme, Boolean(result.isError || ctx?.isError)));
 		const nativeSelf = base.renderShell === "self";
 		const shell = name === "bash" || name === "powershell";
 		const edit = name === "edit";
@@ -1077,6 +1254,7 @@ export default function (pi: ExtensionAPI): void {
 				// record the start here. Codemode highlights the script on demand.
 				if (context.expanded || ((edit || shell) && (!row.ticking || !row.nativeCall))) {
 					row.nativeCall = renderCall(args, theme, { ...context, lastComponent: row.nativeCall });
+					row.nativeCallExpanded = context.expanded;
 					if (context.expanded) {
 						stopAnimation(row);
 						if (nativeSelf) {
@@ -1099,11 +1277,11 @@ export default function (pi: ExtensionAPI): void {
 
 				const pendingColor: ThemeColor = context.isError ? "error" : context.executionStarted ? "warning" : "accent";
 				const metrics: MetricSegment[] = [
-					{ text: context.executionStarted ? "运行中" : "等待结果", color: pendingColor },
+					{ text: context.executionStarted ? "运行中" : "等待结果", color: pendingColor, priority: 1 },
 				];
 				const elapsedMs = animating ? getElapsedMs(row, context.executionStarted) : undefined;
 				const elapsed = animating ? formatLiveElapsed(elapsedMs ?? 0) : "";
-				if (elapsed) metrics.push({ text: elapsed, color: durationColor(elapsedMs) });
+				if (elapsed) metrics.push({ text: elapsed, color: durationColor(elapsedMs), priority: 2 });
 
 				const pendingLine = headerLine(theme, {
 					name,
@@ -1128,6 +1306,11 @@ export default function (pi: ExtensionAPI): void {
 				// A native timer may stay active after a tool was expanded during execution.
 				// Pass it the final result even if the row has been collapsed in the meantime.
 				if (options.expanded || (edit && (!row.ticking || !row.nativeResult)) || (row.nativeTimerPending && !options.isPartial)) {
+					if (options.expanded && !nativeSelf && (!row.nativeCall || !row.nativeCallExpanded)) {
+						const callArgs = row.args ?? (context.args as Record<string, unknown> | undefined);
+						row.nativeCall = renderCall(callArgs, theme, { ...context, expanded: true, lastComponent: row.nativeCall });
+						row.nativeCallExpanded = true;
+					}
 					row.nativeResult = renderResult(result, options, theme, { ...context, lastComponent: row.nativeResult });
 					row.nativeTimerPending = nativeTimer && options.isPartial;
 					if (options.expanded) {

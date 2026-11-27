@@ -1,15 +1,29 @@
 {
   "name": "pi-tool-ui",
-  "version": "0.3.2",
-  "private": true,
+  "version": "0.3.3",
+  "license": "MIT",
   "type": "module",
-  "description": "Clean transparent compact tool renderers for Pi",
-  "keywords": ["pi-package"],
+  "description": "Pi (@earendil-works/pi-coding-agent) plugin for clean, transparent, compact tool renderers with native expanded output",
+  "keywords": [
+    "pi-package",
+    "pi-coding-agent",
+    "pi-extension",
+    "pi-plugin",
+    "tui"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yearsadrift/pi-tool-ui.git"
+  },
+  "homepage": "https://github.com/yearsadrift/pi-tool-ui#readme",
+  "bugs": {
+    "url": "https://github.com/yearsadrift/pi-tool-ui/issues"
+  },
   "pi": {
     "extensions": ["./index.ts"]
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-coding-agent": ">=1.6.1",
     "@earendil-works/pi-tui": "*"
   },
   "scripts": {

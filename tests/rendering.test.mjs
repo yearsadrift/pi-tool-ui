@@ -562,3 +562,227 @@ test("native fullscreen hit testing opens adjacent calls independently and follo
 	assert.match(frame().join("\n"), /later output 23/);
 	assert.equal(view.transcript.isFollowingEnd, true);
 });
+
+test("priority-based metric trimming preserves critical errors, truncation, and diff stats on narrow widths", async () => {
+	const editRow = toolRow("edit", {
+		path: "src/components/editor-panel.ts",
+		edits: [{ oldText: "a", newText: "b" }, { oldText: "c", newText: "d" }, { oldText: "e", newText: "f" }],
+	});
+	editRow.updateResult(result("ok", {
+		details: { diff: "+ 1 a\n+ 2 b\n+ 3 c\n- 1 x\n- 2 y" },
+		durationMs: 18,
+	}));
+	assert.deepEqual(plain(editRow.render(100)), ["▏ ✓ edit      src/components/editor-panel.ts  · +3 · −2 · 3 处 · 18ms"]);
+	const narrowEdit = editRow.render(38);
+	const narrowEditPlain = plain(narrowEdit)[0];
+	assert.match(narrowEditPlain, /\+3 · −2/);
+	assert.ok(!narrowEditPlain.includes("18ms"), "duration should drop before diff counts on narrow width");
+	assert.ok(narrowEdit.every((line) => tui.visibleWidth(line) <= 38));
+
+	const bashRow = toolRow("bash", { command: "npm --prefix pi-tool-ui test" });
+	bashRow.updateResult(result("boom\n\nCommand exited with code 7", { isError: true, durationMs: 12400 }));
+	const narrowBash = bashRow.render(34);
+	assert.match(plain(narrowBash)[0], /exit 7/);
+	assert.ok(!plain(narrowBash)[0].includes("12.4s"), "duration should drop before exit code on narrow width");
+	assert.ok(narrowBash.every((line) => tui.visibleWidth(line) <= 34));
+
+	const { createExtensionRuntime, loadExtensions } = await importPi("core/extensions/loader.js");
+	const runtime = createExtensionRuntime();
+	runtime.getAllTools = () => [{ name: "ffgrep", sourceInfo: { source: "npm:@ff-labs/pi-fff@0.11.0" } }];
+	const loaded = await loadExtensions([join(packageDir, "index.ts")], paths.cwd, undefined, runtime);
+	const [renderer] = loaded.extensions[0].toolRenderers;
+	const base = {
+		renderCall: () => new tui.Text("FFF", 0, 0),
+		renderResult: (value) => new tui.Text(value.content[0].text, 0, 0),
+	};
+	const fffRow = toolRow("ffgrep", { pattern: "needle", path: "src/components", cursor: "c2" }, { definition: renderer("ffgrep", () => base) });
+	fffRow.updateResult(result('[0 exact matches. Maybe you meant this?]\nsrc/a.ts:1:needl\n\n[Continue with cursor="c3"]', {
+		details: { totalMatched: 12, truncated: true },
+		durationMs: 125,
+	}));
+	assert.match(plain(fffRow.render(120))[0], /12 处匹配 · 续页 · 近似匹配 · 可翻页 · 截断 · 125ms/);
+	const narrowFff = fffRow.render(50);
+	const narrowFffPlain = plain(narrowFff)[0];
+	assert.match(narrowFffPlain, /近似匹配/);
+	assert.match(narrowFffPlain, /截断/);
+	assert.ok(!narrowFffPlain.includes("125ms"), "duration should drop before warning badges");
+	assert.ok(narrowFff.every((line) => tui.visibleWidth(line) <= 50));
+});
+
+test("HTML export expanded rendering retains write file content and codemode script source", async () => {
+	const { createToolHtmlRenderer } = await importPi("core/export-html/tool-renderer.js");
+	const htmlRenderer = createToolHtmlRenderer({
+		getToolRenderers: (name) => decorate(name),
+		theme,
+		cwd: paths.cwd,
+		width: 100,
+	});
+
+	const writeArgs = {
+		path: "exported.txt",
+		content: Array.from({ length: 20 }, (_, i) => `EXPORTED-LINE-${i}`).join("\n"),
+	};
+	htmlRenderer.renderCall("write-export", "write", writeArgs);
+	const writeHtml = htmlRenderer.renderResult("write-export", "write", [{ type: "text", text: "Successfully wrote" }], undefined, false);
+	assert.ok(writeHtml?.expanded, "write HTML export should produce expanded output");
+	assert.match(writeHtml.expanded, /EXPORTED-LINE-19/, "write HTML export expanded view must include full written file content");
+	assert.ok(writeHtml.collapsed && writeHtml.collapsed !== writeHtml.expanded, "write HTML export should preserve collapsed summary");
+
+	const codemodeArgs = {
+		code: Array.from({ length: 16 }, (_, i) => `text("EXPORT-SCRIPT-${i}");`).join("\n"),
+	};
+	htmlRenderer.renderCall("cm-export", "codemode", codemodeArgs);
+	const cmHtml = htmlRenderer.renderResult(
+		"cm-export",
+		"codemode",
+		[
+			{ type: "text", text: "Script completed\nWall time 0.1 seconds\nOutput:\n" },
+			{ type: "text", text: "EXPORT-OUTPUT" },
+		],
+		{ calls: [{ name: "read", args: '{"path":"a.txt"}', status: "ok" }] },
+		false,
+	);
+	assert.ok(cmHtml?.expanded, "codemode HTML export should produce expanded output");
+	assert.match(cmHtml.expanded, /EXPORT-SCRIPT-15/, "codemode HTML export expanded view must include full script source");
+	assert.match(cmHtml.expanded, /EXPORT-OUTPUT/);
+});
+
+test("surfaces partial failures, curator-fallback details, codemode cost/images/cancelled, and fallback error color", async () => {
+	const { createExtensionRuntime, loadExtensions } = await importPi("core/extensions/loader.js");
+	const runtime = createExtensionRuntime();
+	runtime.getAllTools = () => [
+		{ name: "web_search", sourceInfo: { source: "npm:pi-web-access@0.48.0" } },
+		{ name: "fetch_content", sourceInfo: { source: "npm:pi-web-access@0.48.0" } },
+		{ name: "get_search_content", sourceInfo: { source: "npm:pi-web-access@0.48.0" } },
+		{ name: "tool_search", sourceInfo: { path: "builtin:tool-search" } },
+	];
+	const loaded = await loadExtensions([join(packageDir, "index.ts")], paths.cwd, undefined, runtime);
+	const [renderer] = loaded.extensions[0].toolRenderers;
+	const base = {
+		renderCall: () => new tui.Text("WEB", 0, 0),
+		renderResult: (value) => new tui.Text(value.content[0].text, 0, 0),
+	};
+
+	// fetch_content all-failed (0/3) -> red ×, partial (1/3) -> yellow !
+	const fetchAllFail = toolRow("fetch_content", { urls: ["https://a.test", "https://b.test", "https://c.test"] }, { definition: renderer("fetch_content", () => base) });
+	fetchAllFail.updateResult(result("failed", { details: { urlCount: 3, successful: 0 } }));
+	const fetchAllFailRaw = fetchAllFail.render(100).join("\n");
+	assert.match(plain(fetchAllFail.render(100))[0], /^▏ × fetch_content .* 0\/3 页$/);
+	assert.ok(fetchAllFailRaw.includes(theme.fg("error", "0/3 页")));
+
+	const fetchPartial = toolRow("fetch_content", { urls: ["https://a.test", "https://b.test", "https://c.test"] }, { definition: renderer("fetch_content", () => base) });
+	fetchPartial.updateResult(result("partial", { details: { urlCount: 3, successful: 1 } }));
+	const fetchPartialRaw = fetchPartial.render(100).join("\n");
+	assert.match(plain(fetchPartial.render(100))[0], /^▏ ! fetch_content .* 1\/3 页$/);
+	assert.ok(fetchPartialRaw.includes(theme.fg("warning", "1/3 页")));
+
+	// web_search partial failure + curator-fallback details
+	const wsPartial = toolRow("web_search", { queries: ["q1", "q2", "q3"] }, { definition: renderer("web_search", () => base) });
+	wsPartial.markExecutionStarted();
+	wsPartial.updateResult(result("fallback", {
+		details: {
+			phase: "curator-fallback",
+			curatorUrl: "http://127.0.0.1:4321",
+			browserOpenError: "xdg-open failed",
+			timeoutSeconds: 30,
+		},
+	}), true);
+	const fallbackLines = plain(wsPartial.render(110));
+	assert.match(fallbackLines[0], /等待确认/);
+	assert.match(fallbackLines[1], /http:\/\/127\.0\.0\.1:4321 \(xdg-open failed\).*30s 后自动提交/);
+
+	wsPartial.updateResult(result("done", { details: { queryCount: 3, successfulQueries: 1, totalResults: 4 } }));
+	const wsPartialRaw = wsPartial.render(100).join("\n");
+	assert.match(plain(wsPartial.render(100))[0], /^▏ ! web_search .* 1\/3 组 · 4 来源$/);
+	assert.ok(wsPartialRaw.includes(theme.fg("warning", "1/3 组")));
+
+	// codemode: error + cancelled coexist, cost & image count, leading blank line in script error
+	const cm = toolRow("codemode", { code: "tools.read({});" });
+	cm.updateResult({
+		content: [
+			{ type: "text", text: "Script completed\nWall time 0.4 seconds\nOutput:\n" },
+			{ type: "image", mimeType: "image/png", data: png },
+		],
+		details: {
+			calls: [
+				{ name: "models.call", args: "{}", status: "ok", cost: 0.025 },
+				{ name: "read", args: "{}", status: "error", error: "ENOENT" },
+				{ name: "bash", args: "{}", status: "cancelled" },
+				{ name: "ls", args: "{}", status: "cancelled" },
+			],
+		},
+		durationMs: 400,
+	});
+	const cmLine = plain(cm.render(120))[0];
+	assert.match(cmLine, /4 次 · 1 失败 · 2 取消 · 1 图 · \$0\.03 · 400ms/);
+
+	cm.updateResult({
+		isError: true,
+		content: [{ type: "text", text: "\n\nReferenceError: boom\nstack" }],
+		details: { calls: [] },
+	});
+	assert.match(plain(cm.render(100))[1], /ReferenceError: boom/);
+
+	// fallbackResultComponent uses error color and strips foreign ANSI
+	const tsErr = toolRow("tool_search", { query: "bad" }, { definition: renderer("tool_search", () => ({ name: "tool_search" })) });
+	tsErr.updateResult(result("\x1b[32mTool search failed\x1b[0m", { isError: true }));
+	tsErr.setExpanded(true);
+	const tsErrRaw = tsErr.render(100).join("\n");
+	assert.ok(tsErrRaw.includes(theme.fg("error", "Tool search failed")));
+	assert.ok(!tsErrRaw.includes("\x1b[32m"));
+});
+
+test("preserves critical call arguments, bash error command fallback, SKILL.md badges, and explicit limit counts", async () => {
+	// bash switches from displaySummary to raw command when execution fails
+	const bashFail = toolRow("bash", { command: "npm --prefix pi-tool-ui test", displaySummary: "运行测试套件" });
+	bashFail.updateResult(result("AssertionError\n\nCommand exited with code 1", { isError: true }));
+	assert.match(plain(bashFail.render(100))[0], /^▏ × bash      npm --prefix pi-tool-ui test  · exit 1$/);
+
+	// read SKILL.md renders [skill] badge with clickable file link
+	const caps = tui.getCapabilities();
+	tui.setCapabilities({ ...caps, hyperlinks: true });
+	try {
+		const skillPath = join(paths.cwd, "skills", "orca-cli", "SKILL.md");
+		const skillRow = toolRow("read", { path: skillPath, offset: 1, limit: 40 });
+		skillRow.updateResult(result("a\nb"));
+		const skillRaw = skillRow.render(100)[1];
+		assert.deepEqual(plain([skillRaw]), ["▏ ✓ read      [skill] orca-cli:1-40  · 2 行"]);
+		assert.ok(skillRaw.includes(pathToFileURL(skillPath).href), "SKILL.md badge must link to the original file");
+	} finally {
+		tui.setCapabilities(caps);
+	}
+
+	// grep glob + explicit matchLimitReached / resultLimitReached / entryLimitReached
+	const grepRow = toolRow("grep", { pattern: "foo", path: "src", glob: "*.ts" });
+	grepRow.updateResult(result("src/a.ts:1:foo", { details: { matchLimitReached: 100 } }));
+	assert.deepEqual(plain(grepRow.render(100)), ['▏ ✓ grep      "foo"  src (*.ts)  · 1 处匹配 · 上限 100']);
+
+	const findRow = toolRow("find", { pattern: "*.ts", path: "." });
+	findRow.updateResult(result("a.ts", { details: { resultLimitReached: 200 } }));
+	assert.deepEqual(plain(findRow.render(100)), ['▏ ✓ find      "*.ts"  · 1 个文件 · 上限 200']);
+
+	const lsRow = toolRow("ls", { path: "." });
+	lsRow.updateResult(result("a.ts", { details: { entryLimitReached: 500 } }));
+	assert.deepEqual(plain(lsRow.render(100)), ["▏ ✓ ls        .  · 1 项 · 上限 500"]);
+
+	// get_search_content offset
+	const { createExtensionRuntime, loadExtensions } = await importPi("core/extensions/loader.js");
+	const runtime = createExtensionRuntime();
+	runtime.getAllTools = () => [{ name: "get_search_content", sourceInfo: { source: "npm:pi-web-access@0.48.0" } }];
+	const loaded = await loadExtensions([join(packageDir, "index.ts")], paths.cwd, undefined, runtime);
+	const [renderer] = loaded.extensions[0].toolRenderers;
+	const gscRow = toolRow("get_search_content", { url: "https://example.com/guide", offset: 4000 }, {
+		definition: renderer("get_search_content", () => ({ name: "get_search_content" })),
+	});
+	gscRow.updateResult(result("chunk", { details: { contentLength: 2000 } }));
+	assert.deepEqual(plain(gscRow.render(100)), ["▏ ✓ get_search_content  example.com/guide @4000  · 2.0k 字"]);
+
+	// Invalid non-string arguments show [无效参数] in error color
+	const badRead = toolRow("read", { path: 12345 });
+	badRead.updateResult(result("invalid path", { isError: true }));
+	assert.ok(badRead.render(100).join("\n").includes(theme.fg("error", "[无效参数]")));
+
+	const badBash = toolRow("bash", { command: { bad: true } });
+	badBash.updateResult(result("invalid command", { isError: true }));
+	assert.ok(badBash.render(100).join("\n").includes(theme.fg("error", "[无效参数]")));
+});
