@@ -37,6 +37,7 @@ const rowState = Symbol("pi-tool-ui row");
 const pulseFrames = ["·", "•", "●", "•"];
 const animationIntervalMs = 200;
 const maxMissedAnimationTicks = 2;
+const activeColor: ThemeColor = "accent";
 const toolNamePadWidth = 8;
 const minAlignedRowWidth = 48;
 const collapsedDisplayNames: Record<string, string> = {
@@ -816,8 +817,7 @@ function buildCodemodeLines(
 	const nestedError = lastError ? [oneLine(lastError.name), oneLine(lastError.error)].filter(Boolean).join(" ") : "";
 
 	const symbol = animating ? activeSymbol(row) : "●";
-	const pendingColor: ThemeColor = context.executionStarted ? "warning" : "accent";
-	const statusColor: ThemeColor = issue || hasNestedError ? "error" : context.isPartial ? pendingColor : cancelled > 0 ? "warning" : "success";
+	const statusColor: ThemeColor = issue || hasNestedError ? "error" : context.isPartial ? activeColor : cancelled > 0 ? "warning" : "success";
 
 	const breakdown = summarizeCallNames(calls);
 	const codemodeLabel = breakdown || undefined;
@@ -839,7 +839,7 @@ function buildCodemodeLines(
 		}
 		if (context.isPartial) {
 			const active = oneLine(running.at(-1)?.name);
-			metrics.push({ text: active ? `正在执行 ${active}` : "运行中", color: "warning", priority: 1 });
+			metrics.push({ text: active ? `正在执行 ${active}` : "运行中", color: activeColor, priority: 1 });
 		}
 		if (cancelled > 0) {
 			metrics.push({ text: `${cancelled} 取消`, color: "warning", priority: 0 });
@@ -954,9 +954,12 @@ function buildToolLines(
 	const allFailed = fetchAllFailed || searchAllFailed;
 	const partialFailed = fetchPartialFailed || searchPartialFailed;
 
+	const awaitingApproval = Boolean(
+		context.isPartial && webAccess &&
+		(details?.phase === "curating" || details?.phase === "waiting-for-approval" || details?.phase === "curator-fallback"),
+	);
 	const symbol = animating ? activeSymbol(row) : "●";
-	const pendingColor: ThemeColor = context.executionStarted ? "warning" : "accent";
-	const statusColor: ThemeColor = isError || allFailed ? "error" : context.isPartial ? pendingColor : partialFailed ? "warning" : "success";
+	const statusColor: ThemeColor = isError || allFailed ? "error" : context.isPartial ? (awaitingApproval ? "warning" : activeColor) : partialFailed ? "warning" : "success";
 
 	// Count meaningful content lines (excluding trailing Pi truncation footers).
 	const contentLines = rawLines.filter((l, idx) => {
@@ -983,16 +986,16 @@ function buildToolLines(
 			if (phase === "curating" || phase === "waiting-for-approval" || phase === "curator-fallback") {
 				metrics.push({ text: "等待确认", color: "warning", priority: 0 });
 			} else if (phase === "generating-summary") {
-				metrics.push({ text: "生成摘要", color: "accent", priority: 1 });
+				metrics.push({ text: "生成摘要", color: activeColor, priority: 1 });
 			} else if (name === "fetch_content") {
-				metrics.push({ text: `抓取中${pct}`, color: "warning", priority: 1 });
+				metrics.push({ text: `抓取中${pct}`, color: activeColor, priority: 1 });
 			} else if (name === "web_search") {
-				metrics.push({ text: `搜索中${pct}`, color: "warning", priority: 1 });
+				metrics.push({ text: `搜索中${pct}`, color: activeColor, priority: 1 });
 			} else {
-				metrics.push({ text: "运行中", color: "warning", priority: 1 });
+				metrics.push({ text: "运行中", color: activeColor, priority: 1 });
 			}
 		} else {
-			metrics.push({ text: "运行中", color: "warning", priority: 1 });
+			metrics.push({ text: "运行中", color: activeColor, priority: 1 });
 			if (shell && contentLines.length > 0 && !(contentLines.length === 1 && contentLines[0] === "(no output)")) {
 				metrics.push({ text: `${contentLines.length} 行`, color: "syntaxVariable", priority: 1 });
 			}
@@ -1281,7 +1284,7 @@ export default function (pi: ExtensionAPI): void {
 					stopAnimation(row);
 				}
 
-				const pendingColor: ThemeColor = context.isError ? "error" : context.executionStarted ? "warning" : "accent";
+				const pendingColor: ThemeColor = context.isError ? "error" : activeColor;
 				const streamingWrite = !context.isError && !context.executionStarted && !context.argsComplete && name === "write" && typeof row.args?.content === "string" && row.args.content.length > 0;
 				const streamingCode = !context.isError && !context.executionStarted && !context.argsComplete && codemode && typeof row.args?.code === "string" && row.args.code.length > 0;
 				const streamingEdit = !context.isError && !context.executionStarted && !context.argsComplete && edit && Array.isArray(row.args?.edits) && row.args.edits.length > 0;

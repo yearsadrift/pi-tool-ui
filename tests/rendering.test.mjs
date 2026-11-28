@@ -287,23 +287,27 @@ test("animates waiting and running rows with breathing dot, live elapsed time, a
 	const widths = new Set(rawLines.map((line) => tui.visibleWidth(line)));
 	assert.equal(widths.size, 1, "waiting animation must not shift line width");
 
-	// Verify live elapsed seconds appear after 1s while waiting, then reset and keep unified pulse dots in warning color on execution start
+	// Verify live elapsed seconds appear after 1s while waiting, then reset and keep unified pulse dots in accent color across waiting & running
 	const realNow = Date.now;
 	let offset = 1500;
 	Date.now = () => realNow() + offset;
 	try {
 		row.invalidate();
-		assert.match(plain(row.render(90))[0], /等待结果 · 2s$/);
+		const waitingRaw = row.render(90)[1];
+		assert.match(plain([waitingRaw])[0], /等待结果 · 2s$/);
+		assert.ok(waitingRaw.includes(theme.fg("accent", "等待结果")), "waiting state should use unified accent color");
 		row.markExecutionStarted();
 		const runningRaw = row.render(90)[1];
 		const runningLine = plain([runningRaw])[0];
 		assert.match(runningLine, /^[·•●] bash/);
 		assert.match(runningLine, /运行中$/);
-		assert.ok(runningRaw.includes(theme.fg("warning", "运行中")), "running state should switch to warning color");
+		assert.ok(runningRaw.includes(theme.fg("accent", "运行中")), "running state should keep unified accent color");
 		offset += 3100;
 		row.updateResult(result("仍在运行"), true);
-		const live = plain(row.render(90));
+		const liveRaw = row.render(90);
+		const live = plain(liveRaw);
 		assert.match(live[0], /运行中 · 1 行 · 3s$/);
+		assert.ok(liveRaw[1].includes(theme.fg("accent", "运行中")), "partial result running state should keep unified accent color");
 		assert.equal(live[1], "└─ 仍在运行");
 	} finally {
 		Date.now = realNow;
