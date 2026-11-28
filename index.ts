@@ -34,11 +34,19 @@ const shellStatusPattern = /^Command (?:exited with code (\d+)|timed out after .
 const shellFooterPattern = /^\[Showing (?:lines |last ).+?\. (?:Full output: (.+)|Could not save the full output: (.+))\]$/;
 const genericFooterPattern = /^\[(?:Showing lines |Truncated |Matches truncated|Results truncated|Entries truncated|Line \d+ is )/;
 const rowState = Symbol("pi-tool-ui row");
-const pulseFrames = ["·", "·", "•", "•", "●", "●", "•", "•", "·", "·"];
-const animationIntervalMs = 100;
+const pulseFrames = ["·", "•", "●", "•"];
+const animationIntervalMs = 200;
 const maxMissedAnimationTicks = 2;
 const toolNamePadWidth = 8;
 const minAlignedRowWidth = 48;
+const collapsedDisplayNames: Record<string, string> = {
+	powershell: "pwsh",
+	web_search: "web",
+	fetch_content: "fetch",
+	get_search_content: "web_read",
+	source_check: "verify",
+	tool_search: "tools",
+};
 type RenderContext = Parameters<NonNullable<ToolRenderers["renderCall"]>>[2];
 type Line = (width: number) => string;
 
@@ -227,11 +235,6 @@ function activeSymbol(row: RowState): string {
 	return pulseFrames[(row.frame ?? 0) % pulseFrames.length]!;
 }
 
-function railPulse(row: RowState): boolean {
-	const frame = (row.frame ?? 0) % pulseFrames.length;
-	return frame >= 2 && frame <= 7;
-}
-
 function getElapsedMs(row: RowState, executionStarted: boolean): number {
 	const startedAt = executionStarted ? (row.execStartedAt ?? row.pendingStartedAt) : row.pendingStartedAt;
 	return startedAt === undefined ? 0 : Math.max(0, Date.now() - startedAt);
@@ -306,6 +309,24 @@ function extractStringList(single: unknown, list: unknown): string[] {
 	return item ? [item] : [];
 }
 
+function formatShellCommand(raw: unknown): { text: string; extraLines: number } {
+	if (typeof raw !== "string") return { text: "", extraLines: 0 };
+	const lines = stripTerminalSequences(raw)
+		.split(/\r\n?|\n/)
+		.map((line) => replaceControlCharacters(line).trim())
+		.filter(Boolean);
+	if (lines.length === 0) return { text: "", extraLines: 0 };
+	return { text: lines[0]!, extraLines: lines.length - 1 };
+}
+
+function countTextLines(text: string): number {
+	return text.length === 0 ? 0 : text.replace(/\r\n?/g, "\n").replace(/\n$/, "").split("\n").length;
+}
+
+function displayToolName(name: string): string {
+	return collapsedDisplayNames[name] ?? name;
+}
+
 function formatNestedCallPreview(call: NonNullable<ResultDetails["calls"]>[number] | undefined, cwd: string): string {
 	if (!call) return "";
 	const name = oneLine(call.name);
@@ -317,7 +338,8 @@ function formatNestedCallPreview(call: NonNullable<ResultDetails["calls"]>[numbe
 		const parsed = JSON.parse(rawArgs) as Record<string, unknown> | null;
 		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
 			const summary = oneLine(parsed.displaySummary);
-			const command = oneLine(parsed.command);
+			const cmdInfo = formatShellCommand(parsed.command);
+			const command = cmdInfo.text ? (cmdInfo.extraLines > 0 ? `${cmdInfo.text} (+${cmdInfo.extraLines} 行)` : cmdInfo.text) : "";
 			const filePath = oneLine(parsed.file_path ?? parsed.path);
 			const pattern = oneLine(parsed.pattern);
 			const query = oneLine(parsed.query) || extractStringList(undefined, parsed.queries)[0] || "";
@@ -444,8 +466,8 @@ function inferCodemodeTools(code: unknown): string {
 	if (typeof code !== "string" || !code) return "";
 	const names: string[] = [];
 	const seen = new Set<string>();
-	for (const match of code.matchAll(/\btools\.([A-Za-z_][A-Za-z0-9_]*)/g)) {
-		const name = match[1]!;
+	for (const match of code.matchAll(/\b(?:tools\.([A-Za-z_][A-Za-z0-9_]*)|(models\.[A-Za-z_][A-Za-z0-9_]*))/g)) {
+		const name = match[1] ?? match[2]!;
 		if (!seen.has(name)) {
 			seen.add(name);
 			names.push(name);
@@ -455,18 +477,10 @@ function inferCodemodeTools(code: unknown): string {
 	return names.join(", ");
 }
 
-function toolAccent(name: string): ThemeColor {
-	if (name === "read" || name === "ls") return "mdLink";
-	if (name === "edit" || name === "write") return "syntaxString";
-	if (name === "bash" || name === "powershell") return "bashMode";
-	if (searchTools.has(name) || name === "tool_search") return "syntaxVariable";
-	if (name === "codemode") return "accent";
-	if (webTools.has(name)) return "syntaxType";
-	return "toolTitle";
-}
+const actionTools = new Set(["edit", "write", "bash", "powershell", "codemode"]);
 
-function railGlyph(theme: Theme, color: ThemeColor, pulse = false): string {
-	return pulse ? theme.fg(color, "▏") : `\x1b[2m${theme.fg(color, "▏")}\x1b[22m`;
+function toolAccent(name: string): ThemeColor {
+	return actionTools.has(name) ? "syntaxFunction" : "toolTitle";
 }
 
 function renderMetrics(theme: Theme, segments: MetricSegment[]): { text: string; width: number } {
@@ -543,7 +557,7 @@ function renderQuotedList(items: string[], maxWidth: number, theme: Theme, empty
 	const extraWidth = visibleWidth(extra);
 	const keepExtra = extraWidth > 0 && maxWidth > extraWidth + 6;
 	const budget = keepExtra ? maxWidth - extraWidth : maxWidth;
-	const quoted = theme.fg("syntaxString", truncateToWidth(`"${items[0]}"`, budget, "…"));
+	const quoted = theme.fg("syntaxVariable", truncateToWidth(`"${items[0]}"`, budget, "…"));
 	return keepExtra ? quoted + theme.fg("dim", extra) : quoted;
 }
 
@@ -559,7 +573,8 @@ function renderSubject(
 	if (maxWidth <= 0) return "";
 
 	if (name === "bash" || name === "powershell") {
-		const rawCmd = oneLine(args?.command);
+		const parsedCmd = formatShellCommand(args?.command);
+		const rawCmd = parsedCmd.text;
 		const invalidCmd = isInvalidStringArg(args?.command);
 		const summary = oneLine(args?.displaySummary);
 		const useSummary = Boolean(summary) && (!preferRawCommand || !rawCmd);
@@ -568,11 +583,18 @@ function renderSubject(
 		}
 		const primary = (useSummary ? summary : rawCmd) || summary || "…";
 		const color: ThemeColor = useSummary ? "text" : "toolOutput";
+		const extraLines = !useSummary && parsedCmd.extraLines > 0 ? ` (+${parsedCmd.extraLines} 行)` : "";
 		const timeout = typeof args?.timeout === "number" ? ` · ${args.timeout}s` : "";
-		const keepTimeout = timeout && maxWidth > visibleWidth(timeout) + 6;
-		const cmdBudget = keepTimeout ? maxWidth - visibleWidth(timeout) : maxWidth;
+		let suffix = "";
+		if (extraLines && maxWidth > visibleWidth(extraLines) + 6) {
+			suffix = extraLines;
+		}
+		if (timeout && maxWidth > visibleWidth(suffix + timeout) + 6) {
+			suffix += timeout;
+		}
+		const cmdBudget = suffix ? maxWidth - visibleWidth(suffix) : maxWidth;
 		const styled = theme.fg(color, truncateToWidth(primary, cmdBudget, "…"));
-		return keepTimeout ? styled + theme.fg("dim", timeout) : styled;
+		return suffix ? styled + theme.fg("dim", suffix) : styled;
 	}
 
 	if (name === "codemode") {
@@ -585,7 +607,7 @@ function renderSubject(
 			return theme.fg("error", truncateToWidth("[无效参数]", maxWidth, "…"));
 		}
 		const query = oneLine(args?.query);
-		return query ? theme.fg("syntaxString", truncateToWidth(`"${query}"`, maxWidth, "…")) : theme.fg("dim", "…");
+		return query ? theme.fg("syntaxVariable", truncateToWidth(`"${query}"`, maxWidth, "…")) : theme.fg("dim", "…");
 	}
 
 	if (name === "web_search") {
@@ -594,7 +616,7 @@ function renderSubject(
 
 	if (name === "source_check") {
 		const claim = oneLine(args?.claim);
-		return claim ? theme.fg("syntaxString", truncateToWidth(`"${claim}"`, maxWidth, "…")) : renderQuotedList(extractStringList(undefined, args?.queries), maxWidth, theme);
+		return claim ? theme.fg("syntaxVariable", truncateToWidth(`"${claim}"`, maxWidth, "…")) : renderQuotedList(extractStringList(undefined, args?.queries), maxWidth, theme);
 	}
 
 	if (name === "fetch_content") {
@@ -622,7 +644,7 @@ function renderSubject(
 		} else {
 			const query = oneLine(args?.query);
 			if (query) {
-				main = theme.fg("syntaxString", truncateToWidth(`"${query}"`, budget, "…"));
+				main = theme.fg("syntaxVariable", truncateToWidth(`"${query}"`, budget, "…"));
 			} else {
 				const url = oneLine(args?.url);
 				if (url) {
@@ -669,11 +691,11 @@ function renderSubject(
 		const scopePath = displayPath && displayPath !== "." ? displayPath : "";
 		const globSuffix = glob ? `(${glob})` : "";
 		if (!scopePath && !globSuffix) {
-			return theme.fg("syntaxString", truncateToWidth(quoted, maxWidth, "…"));
+			return theme.fg("syntaxVariable", truncateToWidth(quoted, maxWidth, "…"));
 		}
 		const patternWidth = visibleWidth(quoted);
 		if (patternWidth + 4 >= maxWidth) {
-			return theme.fg("syntaxString", truncateToWidth(quoted, maxWidth, "…"));
+			return theme.fg("syntaxVariable", truncateToWidth(quoted, maxWidth, "…"));
 		}
 		const scopeBudget = maxWidth - patternWidth - 2;
 		if (scopePath && globSuffix) {
@@ -681,18 +703,18 @@ function renderSubject(
 			if (scopeBudget > globWidth + 5) {
 				const fittedPath = truncatePath(scopePath, scopeBudget - globWidth - 1);
 				const styledPath = theme.fg("dim", fittedPath);
-				return `${theme.fg("syntaxString", quoted)}  ${fileLink ? hyperlink(styledPath, fileLink) : styledPath} ${theme.fg("dim", globSuffix)}`;
+				return `${theme.fg("syntaxVariable", quoted)}  ${fileLink ? hyperlink(styledPath, fileLink) : styledPath} ${theme.fg("dim", globSuffix)}`;
 			}
 			const fittedPath = truncatePath(scopePath, scopeBudget);
 			const styledPath = theme.fg("dim", fittedPath);
-			return `${theme.fg("syntaxString", quoted)}  ${fileLink ? hyperlink(styledPath, fileLink) : styledPath}`;
+			return `${theme.fg("syntaxVariable", quoted)}  ${fileLink ? hyperlink(styledPath, fileLink) : styledPath}`;
 		}
 		if (scopePath) {
 			const fittedPath = truncatePath(scopePath, scopeBudget);
 			const styledPath = theme.fg("dim", fittedPath);
-			return `${theme.fg("syntaxString", quoted)}  ${fileLink ? hyperlink(styledPath, fileLink) : styledPath}`;
+			return `${theme.fg("syntaxVariable", quoted)}  ${fileLink ? hyperlink(styledPath, fileLink) : styledPath}`;
 		}
-		return `${theme.fg("syntaxString", quoted)}  ${theme.fg("dim", truncateToWidth(globSuffix, scopeBudget, "…"))}`;
+		return `${theme.fg("syntaxVariable", quoted)}  ${theme.fg("dim", truncateToWidth(globSuffix, scopeBudget, "…"))}`;
 	}
 
 	if (invalidPath) return theme.fg("error", truncateToWidth("[无效参数]", maxWidth, "…"));
@@ -707,21 +729,18 @@ function headerLine(
 		cwd: string;
 		symbol: string;
 		statusColor: ThemeColor;
-		railColor: ThemeColor;
-		railPulse?: boolean;
 		metrics: MetricSegment[];
 		codemodeLabel?: string;
 		preferRawCommand?: boolean;
 	},
 ): Line {
-	const { name, args, cwd, symbol, statusColor, railColor, railPulse: pulse = false, metrics, codemodeLabel, preferRawCommand = false } = options;
+	const { name, args, cwd, symbol, statusColor, metrics, codemodeLabel, preferRawCommand = false } = options;
 	return (width) => {
-		const paddedName = width >= minAlignedRowWidth && name.length < toolNamePadWidth
-			? name.padEnd(toolNamePadWidth)
-			: name;
-		const basePrefix = `${theme.fg(statusColor, symbol)} ${theme.fg(toolAccent(name), theme.bold(paddedName))}`;
-		const rail = width >= visibleWidth(basePrefix) + 2 ? `${railGlyph(theme, railColor, pulse)} ` : "";
-		const prefix = `${rail}${basePrefix}`;
+		const label = displayToolName(name);
+		const paddedName = width >= minAlignedRowWidth && label.length < toolNamePadWidth
+			? label.padEnd(toolNamePadWidth)
+			: label;
+		const prefix = `${theme.fg(statusColor, symbol)} ${theme.fg(toolAccent(name), theme.bold(paddedName))}`;
 		const prefixWidth = visibleWidth(prefix);
 		if (width <= prefixWidth) return truncateToWidth(prefix, width, "…");
 
@@ -746,17 +765,14 @@ function headerLine(
 
 function detailLine(
 	theme: Theme,
-	railColor: ThemeColor,
 	text: string,
 	color: ThemeColor,
 	notice = "",
 	outputUrl?: string,
-	pulse = false,
 ): Line {
 	return (width) => {
-		const rail = width >= 12 ? `${railGlyph(theme, railColor, pulse)} ` : "";
 		const branch = width >= 12 ? "  └─ " : width >= 8 ? "└─ " : width >= 5 ? "└ " : "";
-		const prefix = rail + theme.fg("dim", branch);
+		const prefix = theme.fg("dim", branch);
 		const available = width - visibleWidth(prefix);
 		if (available <= 0) return truncateToWidth(prefix, width, "…");
 		// At narrow widths, keep enough room to recognize the real error or output.
@@ -770,15 +786,13 @@ function detailLine(
 
 function fullOutputDetail(
 	theme: Theme,
-	railColor: ThemeColor,
 	preview: string,
 	color: ThemeColor,
 	path: string,
 	cwd: string,
-	pulse = false,
 ): Line {
 	const url = getCapabilities().hyperlinks ? pathToFileURL(resolve(cwd, path)).href : undefined;
-	return detailLine(theme, railColor, preview, color, `截断 · 全文 ${shortenPath(path, cwd)}`, url, pulse);
+	return detailLine(theme, preview, color, `截断 · 全文 ${shortenPath(path, cwd)}`, url);
 }
 
 function buildCodemodeLines(
@@ -797,15 +811,13 @@ function buildCodemodeLines(
 	const issue = Boolean(result.isError || context.isError);
 	const hasNestedError = errors.length > 0;
 	const animating = context.isPartial && !issue;
-	const pulse = animating && railPulse(row);
 	const scriptError = issue ? blocks.findLast((text) => /^Script error:\s*/.test(text)) : undefined;
 	const lastError = errors.at(-1);
 	const nestedError = lastError ? [oneLine(lastError.name), oneLine(lastError.error)].filter(Boolean).join(" ") : "";
 
-	const symbol = issue ? "×" : animating ? activeSymbol(row) : hasNestedError ? "!" : "✓";
+	const symbol = animating ? activeSymbol(row) : "●";
 	const pendingColor: ThemeColor = context.executionStarted ? "warning" : "accent";
-	const statusColor: ThemeColor = issue || hasNestedError ? "error" : context.isPartial ? pendingColor : "success";
-	const railColor: ThemeColor = issue || hasNestedError ? "error" : context.isPartial ? pendingColor : toolAccent("codemode");
+	const statusColor: ThemeColor = issue || hasNestedError ? "error" : context.isPartial ? pendingColor : cancelled > 0 ? "warning" : "success";
 
 	const breakdown = summarizeCallNames(calls);
 	const codemodeLabel = breakdown || undefined;
@@ -854,8 +866,6 @@ function buildCodemodeLines(
 			cwd: context.cwd,
 			symbol,
 			statusColor,
-			railColor,
-			railPulse: pulse,
 			metrics,
 			codemodeLabel,
 		}),
@@ -867,23 +877,23 @@ function buildCodemodeLines(
 		const message = firstLine || nestedError || "脚本执行失败";
 		lines.push(
 			details?.fullOutputPath
-				? fullOutputDetail(theme, railColor, message, "error", details.fullOutputPath, context.cwd)
-				: detailLine(theme, railColor, message, "error"),
+				? fullOutputDetail(theme, message, "error", details.fullOutputPath, context.cwd)
+				: detailLine(theme, message, "error"),
 		);
 	} else if (hasNestedError) {
 		const message = nestedError || `${errors.length} 个子调用失败`;
 		lines.push(
 			details?.fullOutputPath
-				? fullOutputDetail(theme, railColor, message, "error", details.fullOutputPath, context.cwd, pulse)
-				: detailLine(theme, railColor, message, "error", "", undefined, pulse),
+				? fullOutputDetail(theme, message, "error", details.fullOutputPath, context.cwd)
+				: detailLine(theme, message, "error"),
 		);
 	} else if (details?.fullOutputPath) {
 		const tail = oneLine(blocks.at(-1)?.split(/\r?\n/).filter(Boolean).at(-1)) || `${calls.length} 个子调用`;
-		lines.push(fullOutputDetail(theme, railColor, tail, "toolOutput", details.fullOutputPath, context.cwd, pulse));
+		lines.push(fullOutputDetail(theme, tail, "toolOutput", details.fullOutputPath, context.cwd));
 	} else if (animating) {
 		const activePreview = formatNestedCallPreview(running.at(-1), context.cwd);
 		if (activePreview) {
-			lines.push(detailLine(theme, railColor, activePreview, "toolOutput", "", undefined, pulse));
+			lines.push(detailLine(theme, activePreview, "toolOutput"));
 		}
 	}
 
@@ -904,7 +914,6 @@ function buildToolLines(
 	const details = result.details as ResultDetails | undefined;
 	const isError = Boolean(result.isError || context.isError || (webAccess && !context.isPartial && typeof details?.error === "string" && details.error));
 	const animating = context.isPartial && !isError;
-	const pulse = animating && railPulse(row);
 	const output = result.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n");
 	const truncatedText = details?.truncation?.content;
 	const rawText = !isError && typeof truncatedText === "string" && truncatedText ? truncatedText : output;
@@ -945,10 +954,9 @@ function buildToolLines(
 	const allFailed = fetchAllFailed || searchAllFailed;
 	const partialFailed = fetchPartialFailed || searchPartialFailed;
 
-	const symbol = isError || allFailed ? "×" : animating ? activeSymbol(row) : partialFailed ? "!" : "✓";
+	const symbol = animating ? activeSymbol(row) : "●";
 	const pendingColor: ThemeColor = context.executionStarted ? "warning" : "accent";
 	const statusColor: ThemeColor = isError || allFailed ? "error" : context.isPartial ? pendingColor : partialFailed ? "warning" : "success";
-	const railColor: ThemeColor = isError || allFailed ? "error" : context.isPartial ? pendingColor : partialFailed ? "warning" : toolAccent(name);
 
 	// Count meaningful content lines (excluding trailing Pi truncation footers).
 	const contentLines = rawLines.filter((l, idx) => {
@@ -1019,7 +1027,7 @@ function buildToolLines(
 		}
 	} else if (name === "write") {
 		if (typeof args?.content === "string") {
-			const writeLines = args.content.length === 0 ? 0 : args.content.replace(/\r\n?/g, "\n").replace(/\n$/, "").split("\n").length;
+			const writeLines = countTextLines(args.content);
 			const bytes = Buffer.byteLength(args.content, "utf8");
 			metrics.push({ text: `${writeLines} 行`, color: "muted", priority: 1 });
 			if (bytes >= 1024) metrics.push({ text: formatBytes(bytes), color: "syntaxVariable", priority: 2 });
@@ -1138,8 +1146,6 @@ function buildToolLines(
 			cwd: context.cwd,
 			symbol,
 			statusColor,
-			railColor,
-			railPulse: pulse,
 			metrics,
 			preferRawCommand: isError,
 		}),
@@ -1157,20 +1163,20 @@ function buildToolLines(
 	if (isError) {
 		const errText = oneLine(details?.error) || preview || "执行失败";
 		if (typeof fullOutputPath === "string" && fullOutputPath) {
-			out.push(fullOutputDetail(theme, railColor, errText, "error", fullOutputPath, context.cwd));
+			out.push(fullOutputDetail(theme, errText, "error", fullOutputPath, context.cwd));
 		} else if (fullOutputError) {
-			out.push(detailLine(theme, railColor, errText, "error", `截断 · 保存失败 ${oneLine(fullOutputError)}`));
+			out.push(detailLine(theme, errText, "error", `截断 · 保存失败 ${oneLine(fullOutputError)}`));
 		} else {
-			out.push(detailLine(theme, railColor, errText, "error", truncated ? "截断" : ""));
+			out.push(detailLine(theme, errText, "error", truncated ? "截断" : ""));
 		}
 	} else if (typeof fullOutputPath === "string" && fullOutputPath) {
-		out.push(fullOutputDetail(theme, railColor, preview || "输出已截断", context.isPartial ? "warning" : "toolOutput", fullOutputPath, context.cwd, pulse));
+		out.push(fullOutputDetail(theme, preview || "输出已截断", context.isPartial ? "warning" : "toolOutput", fullOutputPath, context.cwd));
 	} else if (fullOutputError) {
-		out.push(detailLine(theme, railColor, preview || "输出已截断", "toolOutput", `截断 · 保存失败 ${oneLine(fullOutputError)}`, undefined, pulse));
+		out.push(detailLine(theme, preview || "输出已截断", "toolOutput", `截断 · 保存失败 ${oneLine(fullOutputError)}`));
 	} else if (details?.imageUnsupportedByModel) {
-		out.push(detailLine(theme, railColor, `图片 ${oneLine(image?.mimeType) || "image"}`, "muted", `模型不支持图片 · ${oneLine(details.imageUnsupportedByModel)}`));
+		out.push(detailLine(theme, `图片 ${oneLine(image?.mimeType) || "image"}`, "muted", `模型不支持图片 · ${oneLine(details.imageUnsupportedByModel)}`));
 	} else if (details?.truncation?.firstLineExceedsLimit) {
-		out.push(detailLine(theme, railColor, preview || "首行超出大小限制", "warning", "截断"));
+		out.push(detailLine(theme, preview || "首行超出大小限制", "warning", "截断"));
 	} else if (context.isPartial && webAccess && (details?.curatorUrl || details?.phase === "curator-fallback")) {
 		const hintParts: string[] = [];
 		if (details.shortcut) hintParts.push(`${details.shortcut} 重开`);
@@ -1181,17 +1187,17 @@ function buildToolLines(
 		if (openErr) {
 			const body = details.curatorUrl ? `${details.curatorUrl} (${openErr})` : openErr;
 			const notice = hintParts.join(" · ") || "浏览器打开失败";
-			out.push(detailLine(theme, railColor, body, "warning", notice, details.curatorUrl ? buildWebLink(details.curatorUrl) : undefined, pulse));
+			out.push(detailLine(theme, body, "warning", notice, details.curatorUrl ? buildWebLink(details.curatorUrl) : undefined));
 		} else if (details.curatorUrl) {
 			const notice = hintParts.join(" · ") || "浏览器中确认";
-			out.push(detailLine(theme, railColor, details.curatorUrl, "accent", notice, buildWebLink(details.curatorUrl), pulse));
+			out.push(detailLine(theme, details.curatorUrl, "accent", notice, buildWebLink(details.curatorUrl)));
 		} else if (hintParts.length > 0) {
-			out.push(detailLine(theme, railColor, hintParts.join(" · "), "warning", "", undefined, pulse));
+			out.push(detailLine(theme, hintParts.join(" · "), "warning"));
 		}
 	} else if (context.isPartial && webAccess && details?.currentQuery) {
-		out.push(detailLine(theme, railColor, `"${oneLine(details.currentQuery)}"`, "toolOutput", "", undefined, pulse));
+		out.push(detailLine(theme, `"${oneLine(details.currentQuery)}"`, "toolOutput"));
 	} else if (context.isPartial && shell && preview) {
-		out.push(detailLine(theme, railColor, preview, "toolOutput", truncated ? "截断" : "", undefined, pulse));
+		out.push(detailLine(theme, preview, "toolOutput", truncated ? "截断" : ""));
 	}
 
 	return out;
@@ -1276,9 +1282,22 @@ export default function (pi: ExtensionAPI): void {
 				}
 
 				const pendingColor: ThemeColor = context.isError ? "error" : context.executionStarted ? "warning" : "accent";
-				const metrics: MetricSegment[] = [
-					{ text: context.executionStarted ? "运行中" : "等待结果", color: pendingColor, priority: 1 },
-				];
+				const streamingWrite = !context.isError && !context.executionStarted && !context.argsComplete && name === "write" && typeof row.args?.content === "string" && row.args.content.length > 0;
+				const streamingCode = !context.isError && !context.executionStarted && !context.argsComplete && codemode && typeof row.args?.code === "string" && row.args.code.length > 0;
+				const streamingEdit = !context.isError && !context.executionStarted && !context.argsComplete && edit && Array.isArray(row.args?.edits) && row.args.edits.length > 0;
+				const metrics: MetricSegment[] = [];
+				if (streamingWrite) {
+					metrics.push({ text: "生成中", color: pendingColor, priority: 1 });
+					metrics.push({ text: `${countTextLines(row.args!.content as string)} 行`, color: "syntaxVariable", priority: 1 });
+				} else if (streamingCode) {
+					metrics.push({ text: "生成中", color: pendingColor, priority: 1 });
+					metrics.push({ text: `${countTextLines(row.args!.code as string)} 行`, color: "syntaxVariable", priority: 1 });
+				} else if (streamingEdit) {
+					metrics.push({ text: "生成中", color: pendingColor, priority: 1 });
+					metrics.push({ text: `${(row.args!.edits as unknown[]).length} 处`, color: "syntaxVariable", priority: 1 });
+				} else {
+					metrics.push({ text: context.executionStarted ? "运行中" : "等待结果", color: pendingColor, priority: 1 });
+				}
 				const elapsedMs = animating ? getElapsedMs(row, context.executionStarted) : undefined;
 				const elapsed = animating ? formatLiveElapsed(elapsedMs ?? 0) : "";
 				if (elapsed) metrics.push({ text: elapsed, color: durationColor(elapsedMs), priority: 2 });
@@ -1287,10 +1306,8 @@ export default function (pi: ExtensionAPI): void {
 					name,
 					args: row.args,
 					cwd: context.cwd,
-					symbol: context.isError ? "×" : animating ? activeSymbol(row) : "•",
+					symbol: animating ? activeSymbol(row) : "●",
 					statusColor: pendingColor,
-					railColor: pendingColor,
-					railPulse: animating && railPulse(row),
 					metrics,
 				});
 				row.callSlot = new ToggleSlot(

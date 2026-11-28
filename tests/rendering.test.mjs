@@ -27,36 +27,48 @@ function toolRow(name, args, { ui = { requestRender() {} }, definition = decorat
 
 test("built-ins use transparent self-framed single-line layout when settled and drop background slabs", () => {
 	const bgToken = theme.getBgAnsi("toolSuccessBg");
-	const padName = (name) => name.length < 8 ? name.padEnd(8) : name;
+	const labelOf = (name) => name === "powershell" ? "pwsh" : name;
+	const padName = (name) => {
+		const label = labelOf(name);
+		return label.length < 8 ? label.padEnd(8) : label;
+	};
 	for (const name of builtIns) {
 		const shell = name === "bash" || name === "powershell";
 		const subject = shell ? "echo Chinese-output" : "中文-文件.txt";
 		const args = shell ? { command: subject } : name === "write" ? { path: subject, content: "a\nb\nc" } : { path: subject };
 		const row = toolRow(name, args);
 
-		// Pending & running before result: 1 clean line (plus Pi's single leading blank separator)
+		// Pending & streaming args before result: 1 clean line (plus Pi's single leading blank separator)
 		const pendingRaw = row.render(90);
 		assert.equal(pendingRaw.length, 2, name + " pending total rows");
-		assert.deepEqual(plain(pendingRaw), [`▏ · ${padName(name)}  ${subject}  · 等待结果`]);
+		if (name === "write") {
+			assert.deepEqual(plain(pendingRaw), [`· ${padName(name)}  ${subject}  · 生成中 · 3 行`]);
+			row.setArgsComplete();
+			assert.deepEqual(plain(row.render(90)), [`· ${padName(name)}  ${subject}  · 等待结果`]);
+		} else {
+			assert.deepEqual(plain(pendingRaw), [`· ${padName(name)}  ${subject}  · 等待结果`]);
+		}
 
 		row.markExecutionStarted();
-		assert.deepEqual(plain(row.render(90)), [`▏ · ${padName(name)}  ${subject}  · 运行中`]);
+		assert.deepEqual(plain(row.render(90)), [`· ${padName(name)}  ${subject}  · 运行中`]);
 
 		// Streaming shell shows live output on 2nd branch line and live line count; other tools stay compact
 		row.updateResult(result("测试实时输出"), true);
 		if (shell) {
-			assert.deepEqual(plain(row.render(90)), [`▏ · ${padName(name)}  ${subject}  · 运行中 · 1 行`, "▏   └─ 测试实时输出"]);
+			assert.deepEqual(plain(row.render(90)), [`· ${padName(name)}  ${subject}  · 运行中 · 1 行`, "└─ 测试实时输出"]);
 		} else {
 			assert.equal(plain(row.render(90)).length, 1, name + " partial");
 		}
 
-		// Finalized normal call: 1 compact transparent line (no toolSuccessBg slab, no top/bottom box padding)
+		// Finalized normal call: 1 compact transparent line (no toolSuccessBg slab, no left rail, green dot)
 		row.updateResult(result("测试最终输出", { durationMs: 42 }));
 		const settledRaw = row.render(90);
 		assert.equal(settledRaw.length, 2, name + " settled total rows (1 blank + 1 line)");
 		assert.equal(plain(settledRaw).length, 1, name + " settled content lines");
-		assert.match(plain(settledRaw)[0], new RegExp(`^▏ ✓ ${padName(name)}  `));
+		assert.match(plain(settledRaw)[0], new RegExp(`^● ${padName(name)}  `));
 		assert.match(plain(settledRaw)[0], /42ms$/);
+		assert.ok(settledRaw[1].includes(theme.fg("success", "●")), name + " settled should show green dot");
+		assert.ok(!settledRaw.join("\n").includes("▏"), name + " should not render left vertical rail");
 		if (bgToken) {
 			assert.ok(!settledRaw.join("\n").includes(bgToken), name + " should not paint toolSuccessBg when collapsed");
 		}
@@ -67,33 +79,33 @@ test("per-tool smart metrics, colored diff stats, relative paths and tail-preser
 	// read with relative cwd shortening + line count + duration
 	const readRow = toolRow("read", { path: join(paths.cwd, "sub", "中文.ts"), offset: 10, limit: 25 });
 	readRow.updateResult(result("l1\nl2\nl3", { durationMs: 12 }));
-	assert.deepEqual(plain(readRow.render(90)), ["▏ ✓ read      sub/中文.ts:10-34  · 3 行 · 12ms"]);
+	assert.deepEqual(plain(readRow.render(90)), ["● read      sub/中文.ts:10-34  · 3 行 · 12ms"]);
 
 	// edit with colored +added / -removed diff counts
 	const editRow = toolRow("edit", { path: join(paths.cwd, "src", "app.ts"), edits: [{ oldText: "a", newText: "b" }] });
 	editRow.updateResult(result("ok", { details: { diff: "- 1 old1\n- 2 old2\n+ 1 new1\n+ 2 new2\n+ 3 new3" }, durationMs: 18 }));
 	const editRaw = editRow.render(90).join("\n");
-	assert.deepEqual(plain(editRow.render(90)), ["▏ ✓ edit      src/app.ts  · +3 · −2 · 18ms"]);
+	assert.deepEqual(plain(editRow.render(90)), ["● edit      src/app.ts  · +3 · −2 · 18ms"]);
 	assert.ok(editRaw.includes(theme.fg("toolDiffAdded", "+3")));
 	assert.ok(editRaw.includes(theme.fg("toolDiffRemoved", "−2")));
 
 	// write with line count and KB size
 	const writeRow = toolRow("write", { path: "notes.md", content: "x".repeat(2048) + "\nsecond" });
 	writeRow.updateResult(result("ok", { durationMs: 5 }));
-	assert.deepEqual(plain(writeRow.render(90)), ["▏ ✓ write     notes.md  · 2 行 · 2.0 KB · 5ms"]);
+	assert.deepEqual(plain(writeRow.render(90)), ["● write     notes.md  · 2 行 · 2.0 KB · 5ms"]);
 
 	// grep / find / ls counts
 	const grepRow = toolRow("grep", { path: "src", pattern: "renderShell" });
 	grepRow.updateResult(result("a.ts:1:renderShell\nb.ts:4:renderShell"));
-	assert.deepEqual(plain(grepRow.render(90)), ['▏ ✓ grep      "renderShell"  src  · 2 处匹配']);
+	assert.deepEqual(plain(grepRow.render(90)), ['● grep      "renderShell"  src  · 2 处匹配']);
 
 	const findRow = toolRow("find", { path: ".", pattern: "*.ts" });
 	findRow.updateResult(result("a.ts\nb.ts\nc.ts"));
-	assert.deepEqual(plain(findRow.render(90)), ['▏ ✓ find      "*.ts"  · 3 个文件']);
+	assert.deepEqual(plain(findRow.render(90)), ['● find      "*.ts"  · 3 个文件']);
 
 	const lsRow = toolRow("ls", { path: "." });
 	lsRow.updateResult(result("a.ts\nb.ts"));
-	assert.deepEqual(plain(lsRow.render(90)), ["▏ ✓ ls        .  · 2 项"]);
+	assert.deepEqual(plain(lsRow.render(90)), ["● ls        .  · 2 项"]);
 
 	// Deep path preserves basename when truncated
 	const deepPath = "very/deeply/nested/workspace/directory/structure/components/tool-execution.js";
@@ -108,26 +120,26 @@ test("renders bash displaySummary, OSC 8 file hyperlinks, and duration color tie
 	const bashRow = toolRow("bash", { command: "npm --prefix pi-tool-ui test", displaySummary: "运行测试套件" });
 	bashRow.updateResult(result("ok\nok", { durationMs: 6200 }));
 	const bashRaw = bashRow.render(90).join("\n");
-	assert.deepEqual(plain(bashRow.render(90)), ["▏ ✓ bash      运行测试套件  · 2 行 · 6.2s"]);
-	assert.ok(bashRaw.includes(theme.fg("bashMode", theme.bold("bash    "))), "shell title should use bashMode semantic color");
+	assert.deepEqual(plain(bashRow.render(90)), ["● bash      运行测试套件  · 2 行 · 6.2s"]);
+	assert.ok(bashRaw.includes(theme.fg("syntaxFunction", theme.bold("bash    "))), "mutating/executing tools should use warm gold syntaxFunction");
 	assert.ok(bashRaw.includes(theme.fg("warning", "6.2s")), "slow calls (>=5s) should tint duration warning");
 
 	const mediumRow = toolRow("read", { path: "中文-一.txt" });
 	mediumRow.updateResult(result("line 1", { durationMs: 1800 }));
 	const readRaw = mediumRow.render(90).join("\n");
-	assert.ok(readRaw.includes(theme.fg("mdLink", theme.bold("read    "))), "read title should use mdLink semantic color");
-	assert.ok(readRaw.includes(`\x1b[2m${theme.fg("mdLink", "▏")}\x1b[22m`), "settled rail should tint softly by tool category");
+	assert.ok(readRaw.includes(theme.fg("toolTitle", theme.bold("read    "))), "read-only tools should use clean neutral toolTitle");
+	assert.ok(readRaw.includes(theme.fg("success", "●")), "settled success should show green dot");
 	assert.ok(readRaw.includes(theme.fg("muted", "1.8s")));
 
 	const editColored = toolRow("edit", { path: "中文-一.txt", edits: [{ oldText: "a", newText: "b" }] });
 	editColored.updateResult(result("ok"));
-	assert.ok(editColored.render(90).join("\n").includes(theme.fg("syntaxString", theme.bold("edit    "))));
+	assert.ok(editColored.render(90).join("\n").includes(theme.fg("syntaxFunction", theme.bold("edit    "))));
 
 	const grepColored = toolRow("grep", { path: "src", pattern: "needle" });
 	grepColored.updateResult(result("src/a.ts:1:needle"));
 	const grepRaw = grepColored.render(90).join("\n");
-	assert.ok(grepRaw.includes(theme.fg("syntaxVariable", theme.bold("grep    "))));
-	assert.ok(grepRaw.includes(theme.fg("syntaxString", '"needle"')));
+	assert.ok(grepRaw.includes(theme.fg("toolTitle", theme.bold("grep    "))));
+	assert.ok(grepRaw.includes(theme.fg("syntaxVariable", '"needle"')));
 
 	const caps = tui.getCapabilities();
 	tui.setCapabilities({ ...caps, hyperlinks: true });
@@ -171,7 +183,7 @@ test("FFF search results use the compact layout with the original expanded rende
 		const args = { pattern: "needle", path: "src" };
 		const row = toolRow(name, args, { definition: renderer(name, () => base) });
 		row.updateResult(value);
-		assert.deepEqual(plain(row.render(100)), [`▏ ✓ ${name.padEnd(8)}  "needle"  src  · ${summary}`]);
+		assert.deepEqual(plain(row.render(100)), [`● ${name.padEnd(8)}  "needle"  src  · ${summary}`]);
 		assert.ok(!row.render(100).some((line) => line.includes(theme.getBgAnsi("toolSuccessBg"))));
 		row.setExpanded(true);
 		const reference = toolRow(name, args, { definition: base });
@@ -211,12 +223,12 @@ test("pi-web-access and builtin tool_search use transparent compact rows while p
 	ws.markExecutionStarted();
 	ws.updateResult(result("waiting", { details: { phase: "curating", curatorUrl: "http://127.0.0.1:4321", shortcut: "ctrl+shift+w" } }), true);
 	const curating = plain(ws.render(100));
-	assert.match(curating[0], /^▏ · web_search  "Pi themes" \+2  · 等待确认/);
+	assert.match(curating[0], /^· web       "Pi themes" \+2  · 等待确认/);
 	assert.match(curating[1], /http:\/\/127\.0\.0\.1:4321.*ctrl\+shift\+w 重开/);
 
 	const wsDone = result("Full web search results", { details: { queryCount: 3, successfulQueries: 3, totalResults: 14, summary: { text: "ok" } }, durationMs: 1800 });
 	ws.updateResult(wsDone);
-	assert.deepEqual(plain(ws.render(100)), ['▏ ✓ web_search  "Pi themes" +2  · 3/3 组 · 14 来源 · 已摘要 · 1.8s']);
+	assert.deepEqual(plain(ws.render(100)), ['● web       "Pi themes" +2  · 3/3 组 · 14 来源 · 已摘要 · 1.8s']);
 	assert.ok(!ws.render(100).some((line) => line.includes(theme.getBgAnsi("toolSuccessBg"))));
 	ws.setExpanded(true);
 	const wsRef = toolRow("web_search", { queries: ["Pi themes", "Pi TUI", "Pi extensions"] }, { definition: base });
@@ -226,28 +238,28 @@ test("pi-web-access and builtin tool_search use transparent compact rows while p
 
 	const fetchRow = toolRow("fetch_content", { url: "https://www.github.com/earendil-works/pi" }, { definition: renderer("fetch_content", () => base) });
 	fetchRow.updateResult(result("page", { details: { urlCount: 1, totalChars: 12400, imageCount: 2, truncated: true }, durationMs: 900 }));
-	assert.deepEqual(plain(fetchRow.render(100)), ["▏ ✓ fetch_content  github.com/earendil-works/pi  · 12.4k 字 · 2 图 · 截断 · 900ms"]);
+	assert.deepEqual(plain(fetchRow.render(100)), ["● fetch     github.com/earendil-works/pi  · 12.4k 字 · 2 图 · 截断 · 900ms"]);
 
 	const getRow = toolRow("get_search_content", { responseId: "abc123456", findText: "renderShell" }, { definition: renderer("get_search_content", () => base) });
 	getRow.updateResult(result("matched", { details: { matchCount: 4, returnedMatches: 4 } }));
-	assert.deepEqual(plain(getRow.render(100)), ['▏ ✓ get_search_content  "renderShell"  · 4 处匹配']);
+	assert.deepEqual(plain(getRow.render(100)), ['● web_read  "renderShell"  · 4 处匹配']);
 
 	// source_check and tool_search do not supply custom renderCall/renderResult on base
 	const toolSearchRow = toolRow("tool_search", { query: "calendar" }, { definition: renderer("tool_search", () => ({ name: "tool_search" })) });
 	toolSearchRow.updateResult(result("Loaded 2 tools", { details: { loaded: ["gcal_list", "gcal_create"] }, durationMs: 3 }));
-	assert.deepEqual(plain(toolSearchRow.render(100)), ['▏ ✓ tool_search  "calendar"  · 加载 2 个工具 · 3ms']);
+	assert.deepEqual(plain(toolSearchRow.render(100)), ['● tools     "calendar"  · 加载 2 个工具 · 3ms']);
 	toolSearchRow.setExpanded(true);
 	assert.match(plain(toolSearchRow.render(100)).join("\n"), /Loaded 2 tools/);
 
 	const sourceCheckRow = toolRow("source_check", { claim: "Pi uses OKHSL" }, { definition: renderer("source_check", () => ({ name: "source_check" })) });
 	sourceCheckRow.updateResult(result("Evidence passage"));
-	assert.deepEqual(plain(sourceCheckRow.render(100)), ['▏ ✓ source_check  "Pi uses OKHSL"  · 已核查']);
+	assert.deepEqual(plain(sourceCheckRow.render(100)), ['● verify    "Pi uses OKHSL"  · 已核查']);
 
 	webSource = "npm:other-web-package";
 	assert.equal(renderer("web_search", () => base), base);
 });
 
-test("animates waiting and running rows with spinner, breathing rail, live elapsed time, and clean stop", async () => {
+test("animates waiting and running rows with breathing dot, live elapsed time, and clean stop", async () => {
 	const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 	const frames = [];
 	const rawLines = [];
@@ -265,22 +277,19 @@ test("animates waiting and running rows with spinner, breathing rail, live elaps
 	const initial = row.render(90);
 	frames.push(plain(initial)[0]);
 	rawLines.push(initial[1]);
-	assert.equal(frames[0], "▏ · bash      sleep 1  · 等待结果");
+	assert.equal(frames[0], "· bash      sleep 1  · 等待结果");
 
-	// Waiting uses gentle breathing dots (· -> • -> ●) and pulsing rail without width jitter
-	await sleep(480);
+	// Waiting uses gentle 200ms breathing dots (· -> • -> ● -> •) without width jitter
+	await sleep(680);
 	assert.ok(renders >= 3, `expected >= 3 animation ticks, got ${renders}`);
-	assert.ok(frames.some((line) => line.startsWith("▏ • bash")), frames.join("\n"));
-	assert.ok(frames.some((line) => line.startsWith("▏ ● bash")), frames.join("\n"));
+	assert.ok(frames.some((line) => line.startsWith("• bash")), frames.join("\n"));
+	assert.ok(frames.some((line) => line.startsWith("● bash")), frames.join("\n"));
 	const widths = new Set(rawLines.map((line) => tui.visibleWidth(line)));
 	assert.equal(widths.size, 1, "waiting animation must not shift line width");
-	const dimRail = `\x1b[2m${theme.fg("accent", "▏")}\x1b[22m`;
-	assert.ok(rawLines.some((line) => !line.includes(dimRail)), "rail should pulse bright on part of cycle");
-	assert.ok(rawLines.some((line) => line.includes(dimRail)), "rail should pulse dim on part of cycle");
 
 	// Verify live elapsed seconds appear after 1s while waiting, then reset and keep unified pulse dots in warning color on execution start
 	const realNow = Date.now;
-	let offset = 2400;
+	let offset = 1500;
 	Date.now = () => realNow() + offset;
 	try {
 		row.invalidate();
@@ -288,14 +297,14 @@ test("animates waiting and running rows with spinner, breathing rail, live elaps
 		row.markExecutionStarted();
 		const runningRaw = row.render(90)[1];
 		const runningLine = plain([runningRaw])[0];
-		assert.match(runningLine, /^▏ [·•●] bash/);
+		assert.match(runningLine, /^[·•●] bash/);
 		assert.match(runningLine, /运行中$/);
 		assert.ok(runningRaw.includes(theme.fg("warning", "运行中")), "running state should switch to warning color");
 		offset += 3100;
 		row.updateResult(result("仍在运行"), true);
 		const live = plain(row.render(90));
 		assert.match(live[0], /运行中 · 1 行 · 3s$/);
-		assert.equal(live[1], "▏   └─ 仍在运行");
+		assert.equal(live[1], "└─ 仍在运行");
 	} finally {
 		Date.now = realNow;
 	}
@@ -303,28 +312,28 @@ test("animates waiting and running rows with spinner, breathing rail, live elaps
 	// Expanding pauses our collapsed animation ticks; collapsing resumes them
 	row.setExpanded(true);
 	const rendersWhileExpanded = renders;
-	await sleep(250);
+	await sleep(300);
 	assert.equal(renders, rendersWhileExpanded, "collapsed animation must pause while expanded");
 	row.setExpanded(false);
 	row.render(90);
-	await sleep(250);
+	await sleep(300);
 	assert.ok(renders > rendersWhileExpanded, "collapsed animation must resume after collapsing partial row");
 
 	// Settling stops the animation completely
 	row.updateResult(result("完成输出", { durationMs: 420 }));
-	assert.deepEqual(plain(row.render(90)), ["▏ ✓ bash      sleep 1  · 1 行 · 420ms"]);
+	assert.deepEqual(plain(row.render(90)), ["● bash      sleep 1  · 1 行 · 420ms"]);
 	const rendersAfterSettle = renders;
-	await sleep(250);
+	await sleep(300);
 	assert.equal(renders, rendersAfterSettle, "animation must stop after settling");
 
 	// Detached/unrendered rows automatically stop ticking instead of leaking intervals
 	let detachedTicks = 0;
 	const detached = toolRow("read", { path: "中文-一.txt" }, { ui: { requestRender() { detachedTicks++; } }, id: "anim-detached" });
 	detached.render(90);
-	await sleep(360);
+	await sleep(700);
 	const afterAutoStop = detachedTicks;
 	assert.ok(afterAutoStop >= 1 && afterAutoStop <= 3, `expected auto-stop within 2-3 ticks, got ${afterAutoStop}`);
-	await sleep(250);
+	await sleep(300);
 	assert.equal(detachedTicks, afterAutoStop, "unrendered row must stop ticking automatically");
 });
 
@@ -332,12 +341,13 @@ test("keeps the tool name, error color and real failure at narrow Unicode widths
 	const row = toolRow("powershell", { command: "Write-Output " + "宽路径 👩‍💻 é ".repeat(500) });
 	row.updateResult(result("\x1b[32m缺失文件或权限失败\x1b[0m\nstack trace", { isError: true }));
 	const full = row.render(120).join("\n");
+	assert.ok(full.includes(theme.fg("error", "●")), "error row should show red dot");
 	assert.ok(full.includes(theme.fg("error", "缺失文件或权限失败 …")));
 	assert.ok(!full.includes("\x1b[32m"), "foreign ANSI formatting reached the compact view");
 	for (const width of [14, 21, 38, 70]) {
 		const lines = row.render(width);
 		assert.equal(plain(lines).length, 2);
-		assert.match(plain(lines)[0], /× powershell/);
+		assert.match(plain(lines)[0], /^● pwsh/);
 		assert.match(plain(lines)[1], /缺失/);
 		assert.ok(lines.every((line) => tui.visibleWidth(line) <= width));
 	}
@@ -446,13 +456,13 @@ test("codemode collapses clean runs to one breakdown line and surfaces nested or
 	};
 	row.markExecutionStarted();
 	row.updateResult({ content: [], details: { calls: [{ name: "read", args: "{}", status: "running" }] } }, true);
-	assert.deepEqual(plain(row.render(80)), ["▏ · codemode  read  · 1 次 · 正在执行 read"]);
+	assert.deepEqual(plain(row.render(80)), ["· codemode  read  · 1 次 · 正在执行 read"]);
 
 	row.updateResult({ content: [], details: { calls: [{ name: "read", args: '{"path":"src/app.ts"}', status: "running" }] } }, true);
-	assert.deepEqual(plain(row.render(80)), ["▏ · codemode  read  · 1 次 · 正在执行 read", "▏   └─ read  src/app.ts"]);
+	assert.deepEqual(plain(row.render(80)), ["· codemode  read  · 1 次 · 正在执行 read", "└─ read  src/app.ts"]);
 
 	row.updateResult(cleanOutcome);
-	assert.deepEqual(plain(row.render(80)), ["▏ ✓ codemode  read×2, ls, bash  · 4 次 · 140ms"]);
+	assert.deepEqual(plain(row.render(80)), ["● codemode  read×2, ls, bash  · 4 次 · 140ms"]);
 
 	const errorOutcome = {
 		content: [
@@ -465,8 +475,9 @@ test("codemode collapses clean runs to one breakdown line and surfaces nested or
 	row.setExpanded(true);
 	row.setExpanded(false);
 	row.updateResult(errorOutcome);
-	const compactErr = ["▏ ! codemode  read  · 1 次 · 1 失败 · 200ms", "▏   └─ read ENOENT: missing.txt"];
+	const compactErr = ["● codemode  read  · 1 次 · 1 失败 · 200ms", "└─ read ENOENT: missing.txt"];
 	assert.deepEqual(plain(row.render(80)), compactErr);
+	assert.ok(row.render(80)[1].includes(theme.fg("error", "●")), "nested codemode error should show red dot");
 	assert.equal(plain(row.render(14)).length, 2);
 	assert.ok(row.render(14).every((line) => tui.visibleWidth(line) <= 14));
 
@@ -481,7 +492,8 @@ test("codemode collapses clean runs to one breakdown line and surfaces nested or
 
 	row.updateResult({ ...errorOutcome, isError: true, details: { calls: [] }, content: [{ type: "text", text: "Earlier output" },
 		{ type: "text", text: "Script error:\nTypeError: missing value\nstack trace" }] });
-	assert.deepEqual(plain(row.render(80)), ["▏ × codemode  脚本  · 脚本失败 · 200ms", "▏   └─ TypeError: missing value"]);
+	assert.deepEqual(plain(row.render(80)), ["● codemode  脚本  · 脚本失败 · 200ms", "└─ TypeError: missing value"]);
+	assert.ok(row.render(80)[1].includes(theme.fg("error", "●")), "script failure should show red dot");
 });
 
 test("Pi keeps the image renderer and model-compatibility notice", () => {
@@ -550,7 +562,7 @@ test("native fullscreen hit testing opens adjacent calls independently and follo
 	click("fixture live command");
 	assert.equal(c.expanded, false);
 	c.updateResult(result("流式第一行\n流式最终输出", { durationMs: 320 }));
-	assert.match(frame().join("\n"), /▏ ✓ bash      fixture live command  · 2 行 · 320ms/);
+	assert.match(frame().join("\n"), /● bash      fixture live command  · 2 行 · 320ms/);
 	assert.equal(c.expanded, false);
 
 	renderer.handleViewportInput("\x1b[1;5H");
@@ -572,7 +584,7 @@ test("priority-based metric trimming preserves critical errors, truncation, and 
 		details: { diff: "+ 1 a\n+ 2 b\n+ 3 c\n- 1 x\n- 2 y" },
 		durationMs: 18,
 	}));
-	assert.deepEqual(plain(editRow.render(100)), ["▏ ✓ edit      src/components/editor-panel.ts  · +3 · −2 · 3 处 · 18ms"]);
+	assert.deepEqual(plain(editRow.render(100)), ["● edit      src/components/editor-panel.ts  · +3 · −2 · 3 处 · 18ms"]);
 	const narrowEdit = editRow.render(38);
 	const narrowEditPlain = plain(narrowEdit)[0];
 	assert.match(narrowEditPlain, /\+3 · −2/);
@@ -581,10 +593,10 @@ test("priority-based metric trimming preserves critical errors, truncation, and 
 
 	const bashRow = toolRow("bash", { command: "npm --prefix pi-tool-ui test" });
 	bashRow.updateResult(result("boom\n\nCommand exited with code 7", { isError: true, durationMs: 12400 }));
-	const narrowBash = bashRow.render(34);
+	const narrowBash = bashRow.render(32);
 	assert.match(plain(narrowBash)[0], /exit 7/);
 	assert.ok(!plain(narrowBash)[0].includes("12.4s"), "duration should drop before exit code on narrow width");
-	assert.ok(narrowBash.every((line) => tui.visibleWidth(line) <= 34));
+	assert.ok(narrowBash.every((line) => tui.visibleWidth(line) <= 32));
 
 	const { createExtensionRuntime, loadExtensions } = await importPi("core/extensions/loader.js");
 	const runtime = createExtensionRuntime();
@@ -663,17 +675,19 @@ test("surfaces partial failures, curator-fallback details, codemode cost/images/
 		renderResult: (value) => new tui.Text(value.content[0].text, 0, 0),
 	};
 
-	// fetch_content all-failed (0/3) -> red ×, partial (1/3) -> yellow !
+	// fetch_content all-failed (0/3) -> red dot, partial (1/3) -> warning dot
 	const fetchAllFail = toolRow("fetch_content", { urls: ["https://a.test", "https://b.test", "https://c.test"] }, { definition: renderer("fetch_content", () => base) });
 	fetchAllFail.updateResult(result("failed", { details: { urlCount: 3, successful: 0 } }));
 	const fetchAllFailRaw = fetchAllFail.render(100).join("\n");
-	assert.match(plain(fetchAllFail.render(100))[0], /^▏ × fetch_content .* 0\/3 页$/);
+	assert.match(plain(fetchAllFail.render(100))[0], /^● fetch     .* 0\/3 页$/);
+	assert.ok(fetchAllFailRaw.includes(theme.fg("error", "●")));
 	assert.ok(fetchAllFailRaw.includes(theme.fg("error", "0/3 页")));
 
 	const fetchPartial = toolRow("fetch_content", { urls: ["https://a.test", "https://b.test", "https://c.test"] }, { definition: renderer("fetch_content", () => base) });
 	fetchPartial.updateResult(result("partial", { details: { urlCount: 3, successful: 1 } }));
 	const fetchPartialRaw = fetchPartial.render(100).join("\n");
-	assert.match(plain(fetchPartial.render(100))[0], /^▏ ! fetch_content .* 1\/3 页$/);
+	assert.match(plain(fetchPartial.render(100))[0], /^● fetch     .* 1\/3 页$/);
+	assert.ok(fetchPartialRaw.includes(theme.fg("warning", "●")));
 	assert.ok(fetchPartialRaw.includes(theme.fg("warning", "1/3 页")));
 
 	// web_search partial failure + curator-fallback details
@@ -693,7 +707,8 @@ test("surfaces partial failures, curator-fallback details, codemode cost/images/
 
 	wsPartial.updateResult(result("done", { details: { queryCount: 3, successfulQueries: 1, totalResults: 4 } }));
 	const wsPartialRaw = wsPartial.render(100).join("\n");
-	assert.match(plain(wsPartial.render(100))[0], /^▏ ! web_search .* 1\/3 组 · 4 来源$/);
+	assert.match(plain(wsPartial.render(100))[0], /^● web       .* 1\/3 组 · 4 来源$/);
+	assert.ok(wsPartialRaw.includes(theme.fg("warning", "●")));
 	assert.ok(wsPartialRaw.includes(theme.fg("warning", "1/3 组")));
 
 	// codemode: error + cancelled coexist, cost & image count, leading blank line in script error
@@ -736,7 +751,8 @@ test("preserves critical call arguments, bash error command fallback, SKILL.md b
 	// bash switches from displaySummary to raw command when execution fails
 	const bashFail = toolRow("bash", { command: "npm --prefix pi-tool-ui test", displaySummary: "运行测试套件" });
 	bashFail.updateResult(result("AssertionError\n\nCommand exited with code 1", { isError: true }));
-	assert.match(plain(bashFail.render(100))[0], /^▏ × bash      npm --prefix pi-tool-ui test  · exit 1$/);
+	assert.match(plain(bashFail.render(100))[0], /^● bash      npm --prefix pi-tool-ui test  · exit 1$/);
+	assert.ok(bashFail.render(100)[1].includes(theme.fg("error", "●")));
 
 	// read SKILL.md renders [skill] badge with clickable file link
 	const caps = tui.getCapabilities();
@@ -746,7 +762,7 @@ test("preserves critical call arguments, bash error command fallback, SKILL.md b
 		const skillRow = toolRow("read", { path: skillPath, offset: 1, limit: 40 });
 		skillRow.updateResult(result("a\nb"));
 		const skillRaw = skillRow.render(100)[1];
-		assert.deepEqual(plain([skillRaw]), ["▏ ✓ read      [skill] orca-cli:1-40  · 2 行"]);
+		assert.deepEqual(plain([skillRaw]), ["● read      [skill] orca-cli:1-40  · 2 行"]);
 		assert.ok(skillRaw.includes(pathToFileURL(skillPath).href), "SKILL.md badge must link to the original file");
 	} finally {
 		tui.setCapabilities(caps);
@@ -755,15 +771,15 @@ test("preserves critical call arguments, bash error command fallback, SKILL.md b
 	// grep glob + explicit matchLimitReached / resultLimitReached / entryLimitReached
 	const grepRow = toolRow("grep", { pattern: "foo", path: "src", glob: "*.ts" });
 	grepRow.updateResult(result("src/a.ts:1:foo", { details: { matchLimitReached: 100 } }));
-	assert.deepEqual(plain(grepRow.render(100)), ['▏ ✓ grep      "foo"  src (*.ts)  · 1 处匹配 · 上限 100']);
+	assert.deepEqual(plain(grepRow.render(100)), ['● grep      "foo"  src (*.ts)  · 1 处匹配 · 上限 100']);
 
 	const findRow = toolRow("find", { pattern: "*.ts", path: "." });
 	findRow.updateResult(result("a.ts", { details: { resultLimitReached: 200 } }));
-	assert.deepEqual(plain(findRow.render(100)), ['▏ ✓ find      "*.ts"  · 1 个文件 · 上限 200']);
+	assert.deepEqual(plain(findRow.render(100)), ['● find      "*.ts"  · 1 个文件 · 上限 200']);
 
 	const lsRow = toolRow("ls", { path: "." });
 	lsRow.updateResult(result("a.ts", { details: { entryLimitReached: 500 } }));
-	assert.deepEqual(plain(lsRow.render(100)), ["▏ ✓ ls        .  · 1 项 · 上限 500"]);
+	assert.deepEqual(plain(lsRow.render(100)), ["● ls        .  · 1 项 · 上限 500"]);
 
 	// get_search_content offset
 	const { createExtensionRuntime, loadExtensions } = await importPi("core/extensions/loader.js");
@@ -775,7 +791,7 @@ test("preserves critical call arguments, bash error command fallback, SKILL.md b
 		definition: renderer("get_search_content", () => ({ name: "get_search_content" })),
 	});
 	gscRow.updateResult(result("chunk", { details: { contentLength: 2000 } }));
-	assert.deepEqual(plain(gscRow.render(100)), ["▏ ✓ get_search_content  example.com/guide @4000  · 2.0k 字"]);
+	assert.deepEqual(plain(gscRow.render(100)), ["● web_read  example.com/guide @4000  · 2.0k 字"]);
 
 	// Invalid non-string arguments show [无效参数] in error color
 	const badRead = toolRow("read", { path: 12345 });
@@ -785,4 +801,34 @@ test("preserves critical call arguments, bash error command fallback, SKILL.md b
 	const badBash = toolRow("bash", { command: { bad: true } });
 	badBash.updateResult(result("invalid command", { isError: true }));
 	assert.ok(badBash.render(100).join("\n").includes(theme.fg("error", "[无效参数]")));
+});
+
+test("shows streaming argument progress, multi-line shell formatting, and Pi 1.7.0 codemode models.* recognition", () => {
+	// write streaming args: live line count grows while !argsComplete, then switches to 等待结果 once complete
+	const writeRow = toolRow("write", { path: "src/gen.ts", content: "line1\nline2" });
+	assert.deepEqual(plain(writeRow.render(90)), ["· write     src/gen.ts  · 生成中 · 2 行"]);
+	writeRow.updateArgs({ path: "src/gen.ts", content: "line1\nline2\nline3\nline4" });
+	assert.deepEqual(plain(writeRow.render(90)), ["· write     src/gen.ts  · 生成中 · 4 行"]);
+	writeRow.setArgsComplete();
+	assert.deepEqual(plain(writeRow.render(90)), ["· write     src/gen.ts  · 等待结果"]);
+
+	// edit streaming args: live block count while !argsComplete
+	const editRow = toolRow("edit", { path: "src/app.ts", edits: [{ oldText: "a", newText: "b" }, { oldText: "c", newText: "d" }] });
+	assert.deepEqual(plain(editRow.render(90)), ["· edit      src/app.ts  · 生成中 · 2 处"]);
+
+	// codemode streaming args + Pi 1.7.0 models.generateImages() recognition
+	const cmRow = toolRow("codemode", { code: "const imgs = await models.generateImages({ prompt: 'cat' });\nconsole.log(imgs.length);\nreturn imgs;" });
+	assert.deepEqual(plain(cmRow.render(100)), ["· codemode  models.generateImages  · 生成中 · 3 行"]);
+
+	// Multi-line shell command shows first line + (+N 行) instead of smearing commands together
+	const multiBash = toolRow("bash", { command: "git status\nnpm test\ngit diff --stat" });
+	multiBash.updateResult(result("clean", { durationMs: 40 }));
+	assert.deepEqual(plain(multiBash.render(90)), ["● bash      git status (+2 行)  · 1 行 · 40ms"]);
+
+	// Multi-line shell with displaySummary keeps summary on success, shows first line + (+N 行) on error
+	const multiSummary = toolRow("bash", { command: "git status\nnpm test", displaySummary: "检查并测试" });
+	multiSummary.updateResult(result("ok"));
+	assert.deepEqual(plain(multiSummary.render(90)), ["● bash      检查并测试  · 1 行"]);
+	multiSummary.updateResult(result("failed\n\nCommand exited with code 2", { isError: true }));
+	assert.deepEqual(plain(multiSummary.render(90)), ["● bash      git status (+1 行)  · exit 2", "└─ Command exited with code 2 · failed"]);
 });
