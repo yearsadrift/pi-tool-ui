@@ -37,6 +37,7 @@
 | **会话导出** | 兼容 Pi `/export` HTML 导出，展开 `write` 与 `codemode` 时完整保留文件内容与脚本源码 |
 | **扩展共存** | 通过 `sourceInfo` 白名单精确匹配目标工具，MCP、提问、subagent 及其他第三方工具扩展通过 `next()` 原样透传；零事件监听（不挂额外事件钩子） |
 | **实测环境** | Pi 1.6.1 + Windows Orca（Fullscreen / Regular）、`@ff-labs/pi-fff` 0.11.0、`pi-web-access` 0.48.0 |
+| **自动化回归** | Pi 1.6.1、1.7.0 均通过 20 项 SDK/渲染测试；1.7.0 的 Orca 实机交互尚未复核 |
 
 ---
 
@@ -89,7 +90,7 @@ pi install ./pi-tool-ui
 
 ## 本地试用与测试
 
-在仓库目录运行以下命令即可离线体验或运行全套测试。演示使用临时 Pi 配置，按 `Ctrl+D` 退出。默认查找 Pi 托管安装中的 1.6.1；其他路径可通过环境变量 `PI_TOOL_UI_PI_ROOT` 指定 `@earendil-works/pi-coding-agent` 包目录（需包含 `dist` 并可解析对应 `@earendil-works/pi-tui`）。
+在仓库目录运行以下命令即可离线体验或运行全套测试。演示使用临时 Pi 配置，按 `Ctrl+D` 退出。测试与演示默认读取 Pi 托管安装的 `current-version`，跟随当前安装版本；托管安装根目录可通过 `PI_MANAGED_INSTALL_ROOT` 指定。也可优先通过 `PI_TOOL_UI_PI_ROOT` 指定 `@earendil-works/pi-coding-agent` 包目录，以验证其他版本或非托管安装（需包含 `dist` 并可解析对应 `@earendil-works/pi-tui`）。测试会核对加载的 Pi 版本与该目录的包版本是否一致。
 
 ```sh
 npm run demo -- fullscreen

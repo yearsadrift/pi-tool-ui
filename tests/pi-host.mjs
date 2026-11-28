@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -9,8 +9,11 @@ export const fixture = fileURLToPath(new URL("fixtures/provider.ts", import.meta
 export const builtIns = ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"];
 export const png = "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAFElEQVR4nGMMqFjAgA0wYRUdtBIAHTcBeMwxqO4AAAAASUVORK5CYII=";
 const install = process.env.PI_MANAGED_INSTALL_ROOT ?? join(homedir(), ".pi", "agent", "install");
-export const root = resolve(process.env.PI_TOOL_UI_PI_ROOT ??
-	join(install, "releases", "1.6.1", "node_modules", "@earendil-works", "pi-coding-agent"));
+const explicitRoot = process.env.PI_TOOL_UI_PI_ROOT;
+const currentVersion = explicitRoot ? undefined : (await readFile(join(install, "current-version"), "utf8")).trim();
+export const root = resolve(explicitRoot ??
+	join(install, "releases", currentVersion, "node_modules", "@earendil-works", "pi-coding-agent"));
+const { version: hostVersion } = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
 export const importPi = (file) => import(pathToFileURL(join(root, "dist", file)).href);
 
 export async function workspace() {
@@ -33,7 +36,7 @@ export async function loadHost(agentDir) {
 		importPi("../../pi-tui/dist/index.js"),
 		importPi("core/tools/renderers/index.js"),
 	]);
-	assert.equal(api.VERSION, "1.6.1");
+	assert.equal(api.VERSION, hostVersion);
 	return { api, tui, withBuiltInRenderers };
 }
 
